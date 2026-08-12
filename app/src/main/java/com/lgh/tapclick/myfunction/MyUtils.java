@@ -221,4 +221,12 @@ public class MyUtils {
         }
         return null;
     }
+
+    /**
+     * Xposed/LSPosed 模块激活时可由 Hook 改写为 true。
+     * 未激活时走常规无障碍树遍历逻辑。
+     */
+    public static boolean isModuleValid() {
+        return false;
+    }
 }
