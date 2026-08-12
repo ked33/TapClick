@@ -20,17 +20,19 @@ android {
         }
     }
     signingConfigs {
+        // 正式签名：通过环境变量 / GitHub Secrets 注入，避免把真实密码写进仓库
+        // KEYSTORE_FILE, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD
         release {
-            keyAlias '*'
-            keyPassword '*'
-            storeFile file('../adgo.jks')
-            storePassword '*'
-        }
-        debug {
-            keyAlias '*'
-            keyPassword '*'
-            storeFile file('../adgo.jks')
-            storePassword '*'
+            def ksFile = System.getenv("KEYSTORE_FILE")
+            def ksPass = System.getenv("KEYSTORE_PASSWORD")
+            def kAlias = System.getenv("KEY_ALIAS")
+            def kPass = System.getenv("KEY_PASSWORD")
+            if (ksFile && ksPass && kAlias && kPass) {
+                storeFile file(ksFile)
+                storePassword ksPass
+                keyAlias kAlias
+                keyPassword kPass
+            }
         }
     }
     buildTypes {
@@ -39,13 +41,17 @@ android {
             shrinkResources false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
             buildConfigField("String", "BUILD_TIME", "\"" + new Date().toString() + "\"")
-            signingConfig signingConfigs.release
+            // 未配置正式签名时回退 debug 签名，保证 CI 产出可安装 APK
+            if (System.getenv("KEYSTORE_PASSWORD")) {
+                signingConfig signingConfigs.release
+            } else {
+                signingConfig signingConfigs.debug
+            }
         }
         debug {
             minifyEnabled false
             shrinkResources false
             buildConfigField("String", "BUILD_TIME", "\"" + new Date().toString() + "\"")
-            signingConfig signingConfigs.debug
         }
     }
     buildFeatures {
