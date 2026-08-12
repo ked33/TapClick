@@ -5,3 +5,10 @@
 .vscode
 build
 install.bat
+
+# Signing material — never commit private keys
+*.jks
+*.keystore
+*.p12
+tapclick-release.*
+local.properties
