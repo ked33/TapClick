@@ -9,31 +9,15 @@ android {
         versionCode 106
         versionName "10.6"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        // 仅打包 arm64-v8a，减小体积并与 CI 目标架构一致
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
         javaCompileOptions {
             annotationProcessorOptions {
                 arguments = ["room.schemaLocation": "$projectDir/schemas".toString()]
             }
         }
-    }
-    buildTypes {
-        release {
-            minifyEnabled false
-            shrinkResources false
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            buildConfigField("String", "BUILD_TIME", "\"" + new Date().toString() + "\"")
-        }
-        debug {
-            minifyEnabled false
-            shrinkResources false
-            buildConfigField("String", "BUILD_TIME", "\"" + new Date().toString() + "\"")
-        }
-    }
-    buildFeatures {
-        viewBinding true
-    }
-    compileOptions {
-        targetCompatibility JavaVersion.VERSION_1_8
-        sourceCompatibility JavaVersion.VERSION_1_8
     }
     signingConfigs {
         release {
@@ -48,6 +32,28 @@ android {
             storeFile file('../adgo.jks')
             storePassword '*'
         }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            buildConfigField("String", "BUILD_TIME", "\"" + new Date().toString() + "\"")
+            signingConfig signingConfigs.release
+        }
+        debug {
+            minifyEnabled false
+            shrinkResources false
+            buildConfigField("String", "BUILD_TIME", "\"" + new Date().toString() + "\"")
+            signingConfig signingConfigs.debug
+        }
+    }
+    buildFeatures {
+        viewBinding true
+    }
+    compileOptions {
+        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility JavaVersion.VERSION_1_8
     }
     lintOptions {
         checkReleaseBuilds false
@@ -90,7 +96,8 @@ gradle.projectsEvaluated {
         configureEach {
             Set<File> fileSet = options.bootstrapClasspath.getFiles()
             List<File> newFileList = new ArrayList<>()
-            newFileList.add(new File("libs\\classes4-dex2jar.jar"))
+            // 使用 projectDir 相对路径，兼容 Windows / Linux CI
+            newFileList.add(new File(project.projectDir, "libs/classes4-dex2jar.jar"))
             newFileList.addAll(fileSet)
             options.bootstrapClasspath = files(newFileList.toArray())
         }
