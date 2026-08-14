@@ -110,6 +110,12 @@ public class MainFunction {
     private static final long QUICK_CAPTURE_MODULE_RETRY_MILLIS = 700L;
     private static final long QUICK_CAPTURE_WINDOW_FALLBACK_MILLIS = 1200L;
     private static final int QUICK_CAPTURE_FALLBACK_MAX_NODES = 1200;
+    private static final int QUICK_CAPTURE_SPARSE_NODE_THRESHOLD = 8;
+    private static final long QUICK_CAPTURE_REFRESH_FIRST_DELAY_MILLIS = 450L;
+    private static final long QUICK_CAPTURE_REFRESH_SECOND_DELAY_MILLIS = 900L;
+    private static final int QUICK_CAPTURE_MAX_REFRESH_ATTEMPTS = 2;
+    private static final int CAPTURE_NODE_DIAGNOSTIC_LIMIT = 6;
+    private static final Pattern PACKAGE_NAME_PATTERN = Pattern.compile("[A-Za-z0-9_.]+");
     private static final long MANUAL_CAPTURE_BUDGET_MILLIS = 1500L;
     private static final int MANUAL_CAPTURE_MAX_NODES = 5000;
 
@@ -161,6 +167,7 @@ public class MainFunction {
     private ViewAddDataBinding addDataBinding;
     private ViewWidgetSelectBinding widgetSelectBinding;
     private volatile Widget activeWidgetSelection;
+    private volatile boolean captureLayoutHiddenByUser;
     private ImageView viewClickPosition;
     private volatile Set<String> pkgSuggestNotOnList;
     private View ignoreView;
@@ -270,6 +277,7 @@ public class MainFunction {
                         appDescribe = new AppDescribe();
                         deactivateCurrentPage(false);
                     }
+                    rememberCaptureActivity(event.getClassName());
                     break;
                 }
                 AccessibilityNodeInfo root = service.getRootInActiveWindow();
@@ -334,6 +342,7 @@ public class MainFunction {
                 }
 
                 if (!hasRunnableRules(appDescribe)) {
+                    rememberCaptureActivity(activityName);
                     break;
                 }
                 if (activityName == null) {
@@ -820,6 +829,7 @@ public class MainFunction {
         if (viewClickPosition != null || addDataBinding != null || widgetSelectBinding != null) {
             return;
         }
+        captureLayoutHiddenByUser = false;
         final Widget widgetSelect = new Widget();
         activeWidgetSelection = widgetSelect;
         final Coordinate coordinateSelect = new Coordinate();
@@ -1197,6 +1207,7 @@ public class MainFunction {
                 addDataBinding = null;
                 viewClickPosition = null;
                 activeWidgetSelection = null;
+                captureLayoutHiddenByUser = false;
             }
         });
         windowManager.addView(widgetSelectBinding.getRoot(), bParams);
@@ -1233,6 +1244,7 @@ public class MainFunction {
         String activityAtRequest = currentActivity;
         long requestStartedNanos = System.nanoTime();
         AtomicBoolean panelShown = new AtomicBoolean(false);
+        AtomicReference<AccessibilityLayoutSnapshot> bestSnapshot = new AtomicReference<>();
         addCaptureLog("request", packageAtRequest, true, 0L,
                 "activity=" + valueOrUnknown(activityAtRequest));
         Runnable fallback = () -> {
@@ -1256,14 +1268,79 @@ public class MainFunction {
                 if (snapshot == null || !snapshot.hasSelectableContent()) {
                     showQuickCapturePanel(null, packageAtRequest, "empty", requestStartedNanos);
                 } else {
+                    bestSnapshot.set(snapshot);
                     showQuickCapturePanel(snapshot, packageAtRequest, "snapshot", requestStartedNanos);
                 }
+                scheduleQuickLayoutRefresh(packageAtRequest, activityAtRequest,
+                        captureGeneration, requestStartedNanos, bestSnapshot, 1);
                 return;
             }
             if (snapshot != null && snapshot.hasSelectableContent()) {
-                renderQuickCapturedLayout(snapshot, captureGeneration);
+                bestSnapshot.set(snapshot);
+                renderQuickCapturedLayout(snapshot, captureGeneration, false, "lateRender");
             }
+            scheduleQuickLayoutRefresh(packageAtRequest, activityAtRequest,
+                    captureGeneration, requestStartedNanos, bestSnapshot, 1);
         });
+    }
+
+    private void scheduleQuickLayoutRefresh(String packageAtRequest,
+                                             String activityAtRequest,
+                                             long captureGeneration,
+                                             long requestStartedNanos,
+                                             AtomicReference<AccessibilityLayoutSnapshot> bestSnapshot,
+                                             int attempt) {
+        if (attempt > QUICK_CAPTURE_MAX_REFRESH_ATTEMPTS
+                || closed.get()
+                || captureGeneration != layoutCaptureGeneration.get()
+                || activeWidgetSelection == null
+                || activeWidgetSelection.widgetRect != null
+                || !shouldRefreshQuickSnapshot(bestSnapshot.get(), attempt)) {
+            return;
+        }
+        long delayMillis = attempt == 1
+                ? QUICK_CAPTURE_REFRESH_FIRST_DELAY_MILLIS
+                : QUICK_CAPTURE_REFRESH_SECOND_DELAY_MILLIS;
+        mainHandler.postDelayed(() -> {
+            if (closed.get()
+                    || captureGeneration != layoutCaptureGeneration.get()
+                    || viewClickPosition == null
+                    || addDataBinding == null
+                    || widgetSelectBinding == null
+                    || activeWidgetSelection == null
+                    || activeWidgetSelection.widgetRect != null
+                    || captureLayoutHiddenByUser) {
+                return;
+            }
+            addCaptureLog("refreshRequest", packageAtRequest, true,
+                    elapsedMillis(requestStartedNanos), "attempt=" + attempt);
+            captureLayoutAsync(packageAtRequest, activityAtRequest, true, refreshedSnapshot -> {
+                if (closed.get() || captureGeneration != layoutCaptureGeneration.get()) {
+                    return;
+                }
+                AccessibilityLayoutSnapshot previousSnapshot = bestSnapshot.get();
+                if (refreshedSnapshot != null
+                        && refreshedSnapshot.hasSelectableContent()
+                        && (previousSnapshot == null
+                        || capturedNodeQuality(refreshedSnapshot)
+                        >= capturedNodeQuality(previousSnapshot))) {
+                    bestSnapshot.set(refreshedSnapshot);
+                    renderQuickCapturedLayout(refreshedSnapshot, captureGeneration,
+                            true, "refreshRender");
+                }
+                scheduleQuickLayoutRefresh(packageAtRequest, activityAtRequest,
+                        captureGeneration, requestStartedNanos, bestSnapshot, attempt + 1);
+            });
+        }, delayMillis);
+    }
+
+    private static boolean shouldRefreshQuickSnapshot(
+            AccessibilityLayoutSnapshot snapshot, int attempt) {
+        return snapshot == null
+                || !snapshot.hasInteractiveContent()
+                || snapshot.getVisibleNodeCount() == 0
+                || (attempt == 1
+                && snapshot.getNodes().size() <= QUICK_CAPTURE_SPARSE_NODE_THRESHOLD);
     }
 
     private void requestManualLayoutCapture(Widget widgetSelect) {
@@ -1315,6 +1392,7 @@ public class MainFunction {
                         ? 0 : capturedSnapshot.getNodes().size();
                 trace.selectable = capturedSnapshot != null
                         && capturedSnapshot.hasSelectableContent();
+                trace.recordSnapshot(capturedSnapshot);
                 addCaptureLog("complete", packageAtRequest, quick,
                         trace.elapsedMillis, trace.toDetails());
                 AccessibilityLayoutSnapshot snapshot = capturedSnapshot;
@@ -1476,15 +1554,20 @@ public class MainFunction {
         return new ArrayList<>(new AccessibilityLayoutSnapshot("", "", nodes).getNodes());
     }
 
-    private static int capturedNodeQuality(List<AccessibilityLayoutSnapshot.Node> nodes) {
+    private static long capturedNodeQuality(List<AccessibilityLayoutSnapshot.Node> nodes) {
         AccessibilityLayoutSnapshot snapshot = new AccessibilityLayoutSnapshot("", "", nodes);
-        return (snapshot.hasSelectableContent() ? 100_000 : 0) + snapshot.getNodes().size();
+        return snapshot.getInteractiveNodeCount() * 1_000_000L
+                + snapshot.getIdentifiedNodeCount() * 10_000L
+                + snapshot.getVisibleNodeCount() * 100L
+                + snapshot.getNodes().size();
     }
 
     private static boolean requiresCaptureEnrichment(
             List<AccessibilityLayoutSnapshot.Node> nodes) {
         AccessibilityLayoutSnapshot snapshot = new AccessibilityLayoutSnapshot("", "", nodes);
-        return snapshot.getNodes().size() <= 1 && !snapshot.hasSelectableContent();
+        return snapshot.isEmpty()
+                || !snapshot.hasInteractiveContent()
+                || snapshot.getNodes().size() <= QUICK_CAPTURE_SPARSE_NODE_THRESHOLD;
     }
 
     private void appendCapturedNodes(AccessibilityNodeInfo root,
@@ -1528,11 +1611,12 @@ public class MainFunction {
             }
             visitedCount++;
             trace.visitedNodes++;
+            AccessibilityLayoutSnapshot.Node capturedNode = null;
             try {
                 Rect bounds = new Rect();
                 node.getBoundsInScreen(bounds);
                 if (bounds.width() > 0 && bounds.height() > 0) {
-                    capturedNodes.add(new AccessibilityLayoutSnapshot.Node(
+                    capturedNode = new AccessibilityLayoutSnapshot.Node(
                             node.isClickable(),
                             node.getSourceNodeId(),
                             StrUtil.toStringOrEmpty(node.getViewIdResourceName()),
@@ -1541,7 +1625,16 @@ public class MainFunction {
                             bounds.left,
                             bounds.top,
                             bounds.right,
-                            bounds.bottom));
+                            bounds.bottom,
+                            node.isVisibleToUser(),
+                            node.isEnabled(),
+                            node.isFocusable(),
+                            node.getActions(),
+                            node.getChildCount(),
+                            node.getWindowId(),
+                            StrUtil.toStringOrEmpty(node.getClassName()),
+                            StrUtil.toStringOrEmpty(node.getPackageName()));
+                    capturedNodes.add(capturedNode);
                 }
             } catch (RuntimeException ignored) {
                 trace.nodeReadFailures++;
@@ -1549,7 +1642,8 @@ public class MainFunction {
                 // Keep the properties already copied from the remaining nodes.
             }
             try {
-                int childCount = node.getChildCount();
+                int childCount = capturedNode == null
+                        ? node.getChildCount() : capturedNode.getChildCount();
                 if (trace.rootChildCount < 0) {
                     trace.rootChildCount = childCount;
                 }
@@ -1570,7 +1664,9 @@ public class MainFunction {
     }
 
     private void renderQuickCapturedLayout(AccessibilityLayoutSnapshot snapshot,
-                                           long captureGeneration) {
+                                           long captureGeneration,
+                                           boolean allowVisibleRefresh,
+                                           String phase) {
         if (!snapshot.hasSelectableContent()
                 || closed.get()
                 || captureGeneration != layoutCaptureGeneration.get()
@@ -1579,13 +1675,18 @@ public class MainFunction {
                 || activeWidgetSelection == null) {
             return;
         }
-        if (bParams == null || bParams.alpha != 0f
+        if (bParams == null || (!allowVisibleRefresh && bParams.alpha != 0f)
                 || activeWidgetSelection.widgetRect != null) {
             return;
         }
-        addCaptureLog("lateRender", snapshot.getAppPackage(), true, 0L,
-                "nodes=" + snapshot.getNodes().size());
-        renderCapturedLayout(snapshot, activeWidgetSelection);
+        RenderResult result = renderCapturedLayout(snapshot, activeWidgetSelection);
+        addCaptureLog(phase, snapshot.getAppPackage(), true, 0L,
+                "nodes=" + snapshot.getNodes().size()
+                        + " rendered=" + result.renderedNodeCount
+                        + " interactive=" + result.interactiveNodeCount
+                        + " clipped=" + result.clippedNodeCount
+                        + " outside=" + result.outsideNodeCount
+                        + " overlay=" + bParams.width + "x" + bParams.height);
     }
 
     private void showQuickCapturePanel(AccessibilityLayoutSnapshot snapshot,
@@ -1599,16 +1700,24 @@ public class MainFunction {
         boolean created = addDataBinding != null
                 && widgetSelectBinding != null
                 && viewClickPosition != null;
+        int renderedNodeCount = widgetSelectBinding == null
+                ? 0 : widgetSelectBinding.frame.getChildCount();
+        int interactiveNodeCount = snapshot == null
+                ? 0 : snapshot.getInteractiveNodeCount();
         addCaptureLog("panelReady", packageName, true,
                 elapsedMillis(requestStartedNanos),
-                "source=" + source + " nodes=" + nodeCount + " created=" + created);
+                "source=" + source + " nodes=" + nodeCount
+                        + " rendered=" + renderedNodeCount
+                        + " interactive=" + interactiveNodeCount
+                        + " created=" + created);
     }
 
-    private void renderCapturedLayout(AccessibilityLayoutSnapshot snapshot, Widget widgetSelect) {
+    private RenderResult renderCapturedLayout(AccessibilityLayoutSnapshot snapshot,
+                                              Widget widgetSelect) {
         ViewAddDataBinding currentAddBinding = addDataBinding;
         ViewWidgetSelectBinding currentWidgetBinding = widgetSelectBinding;
         if (currentAddBinding == null || currentWidgetBinding == null || bParams == null) {
-            return;
+            return RenderResult.empty();
         }
 
         widgetSelect.appPackage = snapshot.getAppPackage();
@@ -1618,10 +1727,14 @@ public class MainFunction {
         currentAddBinding.saveWid.setEnabled(false);
         currentWidgetBinding.frame.removeAllViews();
 
-        View.OnClickListener onClickListener = view -> view.requestFocus();
+        View.OnClickListener onClickListener = view -> {
+            AccessibilityLayoutSnapshot.Node node =
+                    (AccessibilityLayoutSnapshot.Node) view.getTag(R.string.nodeInfo);
+            applyCapturedNodeSelection(node, view, widgetSelect,
+                    currentAddBinding, currentWidgetBinding);
+            view.requestFocus();
+        };
         View.OnFocusChangeListener onFocusChangeListener = new View.OnFocusChangeListener() {
-            final Pattern packagePattern = Pattern.compile("[A-Za-z0-9_.]+");
-
             @Override
             public void onFocusChange(View view, boolean hasFocus) {
                 if (currentAddBinding != addDataBinding
@@ -1634,47 +1747,39 @@ public class MainFunction {
                 }
                 AccessibilityLayoutSnapshot.Node node =
                         (AccessibilityLayoutSnapshot.Node) view.getTag(R.string.nodeInfo);
-                widgetSelect.widgetClickable = node.isClickable();
-                widgetSelect.widgetRect = new Rect(
-                        node.getLeft(),
-                        node.getTop(),
-                        node.getLeft() + node.getWidth(),
-                        node.getTop() + node.getHeight());
-                widgetSelect.widgetNodeId = node.getNodeId();
-                widgetSelect.widgetViewId = node.getViewId();
-                widgetSelect.widgetDescribe = node.getDescription();
-                widgetSelect.widgetText = node.getText();
-                currentAddBinding.pkgName.setText(widgetSelect.appPackage);
-                currentAddBinding.actName.setText(widgetSelect.appActivity);
-                currentAddBinding.saveWid.setEnabled(
-                        packagePattern.matcher(widgetSelect.appPackage).matches());
-                String clickable = "clickable:" + widgetSelect.widgetClickable;
-                String nodeId = "nodeId:" + widgetSelect.widgetNodeId;
-                String viewId = widgetSelect.widgetViewId.isEmpty()
-                        ? "" : widgetSelect.widgetViewId.contains(":id/")
-                        ? "viewId:" + widgetSelect.widgetViewId.substring(
-                        widgetSelect.widgetViewId.indexOf(":id/") + 4) : "";
-                String desc = widgetSelect.widgetDescribe.isEmpty()
-                        ? "" : "describe:" + widgetSelect.widgetDescribe;
-                String text = widgetSelect.widgetText.isEmpty()
-                        ? "" : "text:" + widgetSelect.widgetText;
-                currentAddBinding.widget.setText(clickable + " " + nodeId
-                        + (viewId.isEmpty() ? "" : " " + viewId)
-                        + (desc.isEmpty() ? "" : " " + desc)
-                        + (text.isEmpty() ? "" : " " + text));
-                view.setBackgroundResource(R.drawable.node_focus);
+                applyCapturedNodeSelection(node, view, widgetSelect,
+                        currentAddBinding, currentWidgetBinding);
             }
         };
 
         int renderedNodeCount = 0;
+        int interactiveNodeCount = 0;
+        int clippedNodeCount = 0;
+        int outsideNodeCount = 0;
+        int overlayWidth = bParams.width;
+        int overlayHeight = bParams.height;
         for (AccessibilityLayoutSnapshot.Node node : snapshot.getNodes()) {
             if (node.getWidth() <= 0 || node.getHeight() <= 0) {
                 continue;
             }
+            Rect nodeBounds = new Rect(
+                    node.getLeft(), node.getTop(),
+                    node.getLeft() + node.getWidth(),
+                    node.getTop() + node.getHeight());
+            Rect visibleBounds = new Rect(nodeBounds);
+            if (overlayWidth > 0 && overlayHeight > 0) {
+                if (!visibleBounds.intersect(0, 0, overlayWidth, overlayHeight)) {
+                    outsideNodeCount++;
+                    continue;
+                }
+                if (!visibleBounds.equals(nodeBounds)) {
+                    clippedNodeCount++;
+                }
+            }
             FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                    node.getWidth(), node.getHeight());
-            params.leftMargin = node.getLeft();
-            params.topMargin = node.getTop();
+                    visibleBounds.width(), visibleBounds.height());
+            params.leftMargin = visibleBounds.left;
+            params.topMargin = visibleBounds.top;
             View view = new View(service);
             view.setBackgroundResource(R.drawable.node);
             view.setFocusableInTouchMode(true);
@@ -1684,12 +1789,16 @@ public class MainFunction {
             view.setTag(R.string.nodeInfo, node);
             currentWidgetBinding.frame.addView(view, params);
             renderedNodeCount++;
+            if (node.isInteractive()) {
+                interactiveNodeCount++;
+            }
         }
         currentAddBinding.switchWid.setEnabled(true);
         if (renderedNodeCount == 0) {
             currentAddBinding.switchWid.setText("显示布局");
             Toast.makeText(service, "当前页面没有可选择的控件", Toast.LENGTH_SHORT).show();
-            return;
+            return new RenderResult(0, interactiveNodeCount, clippedNodeCount,
+                    outsideNodeCount);
         }
 
         bParams.alpha = 0.5f;
@@ -1698,6 +1807,69 @@ public class MainFunction {
                 | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
         windowManager.updateViewLayout(currentWidgetBinding.getRoot(), bParams);
         currentAddBinding.switchWid.setText("隐藏布局");
+        captureLayoutHiddenByUser = false;
+        return new RenderResult(renderedNodeCount, interactiveNodeCount,
+                clippedNodeCount, outsideNodeCount);
+    }
+
+    private void applyCapturedNodeSelection(AccessibilityLayoutSnapshot.Node node,
+                                             View view,
+                                             Widget widgetSelect,
+                                             ViewAddDataBinding currentAddBinding,
+                                             ViewWidgetSelectBinding currentWidgetBinding) {
+        if (node == null
+                || currentAddBinding != addDataBinding
+                || currentWidgetBinding != widgetSelectBinding) {
+            return;
+        }
+        widgetSelect.widgetClickable = node.isClickable() || node.hasClickAction();
+        widgetSelect.widgetRect = new Rect(
+                node.getLeft(),
+                node.getTop(),
+                node.getLeft() + node.getWidth(),
+                node.getTop() + node.getHeight());
+        widgetSelect.widgetNodeId = node.getNodeId();
+        widgetSelect.widgetViewId = node.getViewId();
+        widgetSelect.widgetDescribe = node.getDescription();
+        widgetSelect.widgetText = node.getText();
+        currentAddBinding.pkgName.setText(widgetSelect.appPackage);
+        currentAddBinding.actName.setText(widgetSelect.appActivity);
+        currentAddBinding.saveWid.setEnabled(
+                PACKAGE_NAME_PATTERN.matcher(widgetSelect.appPackage).matches());
+        String clickable = "clickable:" + widgetSelect.widgetClickable;
+        String nodeId = "nodeId:" + widgetSelect.widgetNodeId;
+        String viewId = widgetSelect.widgetViewId.isEmpty()
+                ? "" : widgetSelect.widgetViewId.contains(":id/")
+                ? "viewId:" + widgetSelect.widgetViewId.substring(
+                widgetSelect.widgetViewId.indexOf(":id/") + 4) : "";
+        String desc = widgetSelect.widgetDescribe.isEmpty()
+                ? "" : "describe:" + widgetSelect.widgetDescribe;
+        String text = widgetSelect.widgetText.isEmpty()
+                ? "" : "text:" + widgetSelect.widgetText;
+        currentAddBinding.widget.setText(clickable + " " + nodeId
+                + (viewId.isEmpty() ? "" : " " + viewId)
+                + (desc.isEmpty() ? "" : " " + desc)
+                + (text.isEmpty() ? "" : " " + text));
+        view.setBackgroundResource(R.drawable.node_focus);
+    }
+
+    private static final class RenderResult {
+        private final int renderedNodeCount;
+        private final int interactiveNodeCount;
+        private final int clippedNodeCount;
+        private final int outsideNodeCount;
+
+        private RenderResult(int renderedNodeCount, int interactiveNodeCount,
+                             int clippedNodeCount, int outsideNodeCount) {
+            this.renderedNodeCount = renderedNodeCount;
+            this.interactiveNodeCount = interactiveNodeCount;
+            this.clippedNodeCount = clippedNodeCount;
+            this.outsideNodeCount = outsideNodeCount;
+        }
+
+        private static RenderResult empty() {
+            return new RenderResult(0, 0, 0, 0);
+        }
     }
 
     private void hideCapturedLayout() {
@@ -1714,6 +1886,7 @@ public class MainFunction {
         widgetSelectBinding.frame.removeAllViews();
         addDataBinding.switchWid.setEnabled(true);
         addDataBinding.switchWid.setText("显示布局");
+        captureLayoutHiddenByUser = true;
     }
 
     private static long elapsedMillis(long startedNanos) {
@@ -1733,6 +1906,16 @@ public class MainFunction {
         return value == null || value.isEmpty() ? "未知" : value;
     }
 
+    private void rememberCaptureActivity(CharSequence activityNameValue) {
+        String activityName = activityNameValue == null ? "" : activityNameValue.toString();
+        if (activityName.isEmpty()
+                || activityName.startsWith("android.view.")
+                || activityName.startsWith("android.widget.")) {
+            return;
+        }
+        currentActivity = activityName;
+    }
+
     private static final class CaptureTrace {
         private final long startedNanos = System.nanoTime();
         private boolean moduleEnabled;
@@ -1741,12 +1924,16 @@ public class MainFunction {
         private int visitedNodes;
         private int capturedNodes;
         private boolean selectable;
+        private int interactiveNodes;
+        private int identifiedNodes;
+        private int visibleNodes;
         private int rootChildCount = -1;
         private int moduleQueryNodes;
         private int moduleQueryFailures;
         private int nodeReadFailures;
         private int childReadFailures;
         private String source = "none";
+        private String outcome = "none";
         private String failure;
         private long elapsedMillis;
         private long rootLookupMillis;
@@ -1754,26 +1941,60 @@ public class MainFunction {
         private long moduleTraversalMillis;
         private long windowLookupMillis;
         private long windowTraversalMillis;
+        private final List<String> nodeSamples = new ArrayList<>();
+
+        private void recordSnapshot(AccessibilityLayoutSnapshot snapshot) {
+            if (snapshot == null) {
+                return;
+            }
+            interactiveNodes = snapshot.getInteractiveNodeCount();
+            identifiedNodes = snapshot.getIdentifiedNodeCount();
+            visibleNodes = snapshot.getVisibleNodeCount();
+            outcome = snapshot.hasInteractiveContent()
+                    ? "interactive"
+                    : snapshot.hasSelectableContent() ? "coordinateOnly" : "placeholder";
+            int sampleCount = Math.min(CAPTURE_NODE_DIAGNOSTIC_LIMIT,
+                    snapshot.getNodes().size());
+            for (int index = 0; index < sampleCount; index++) {
+                nodeSamples.add(snapshot.getNodes().get(index).toDebugSummary(index));
+            }
+        }
 
         private String toDetails() {
-            return "source=" + source
-                    + " module=" + moduleEnabled
-                    + " rootMs=" + rootLookupMillis
-                    + " activeMs=" + activeTraversalMillis
-                    + " moduleMs=" + moduleTraversalMillis
-                    + " windowLookupMs=" + windowLookupMillis
-                    + " windowMs=" + windowTraversalMillis
-                    + " windows=" + windowCount
-                    + " matchedWindows=" + matchedWindowCount
-                    + " rootChildren=" + rootChildCount
-                    + " visited=" + visitedNodes
-                    + " nodes=" + capturedNodes
-                    + " selectable=" + selectable
-                    + " moduleNodes=" + moduleQueryNodes
-                    + " moduleErrors=" + moduleQueryFailures
-                    + " nodeErrors=" + nodeReadFailures
-                    + " childErrors=" + childReadFailures
-                    + (failure == null ? "" : " failure=" + failure);
+            StringBuilder details = new StringBuilder("source=").append(source)
+                    .append(" module=").append(moduleEnabled)
+                    .append(" rootMs=").append(rootLookupMillis)
+                    .append(" activeMs=").append(activeTraversalMillis)
+                    .append(" moduleMs=").append(moduleTraversalMillis)
+                    .append(" windowLookupMs=").append(windowLookupMillis)
+                    .append(" windowMs=").append(windowTraversalMillis)
+                    .append(" windows=").append(windowCount)
+                    .append(" matchedWindows=").append(matchedWindowCount)
+                    .append(" rootChildren=").append(rootChildCount)
+                    .append(" visited=").append(visitedNodes)
+                    .append(" nodes=").append(capturedNodes)
+                    .append(" selectable=").append(selectable)
+                    .append(" outcome=").append(outcome)
+                    .append(" interactive=").append(interactiveNodes)
+                    .append(" identified=").append(identifiedNodes)
+                    .append(" visible=").append(visibleNodes)
+                    .append(" moduleNodes=").append(moduleQueryNodes)
+                    .append(" moduleErrors=").append(moduleQueryFailures)
+                    .append(" nodeErrors=").append(nodeReadFailures)
+                    .append(" childErrors=").append(childReadFailures);
+            if (!nodeSamples.isEmpty()) {
+                details.append(" samples=");
+                for (int index = 0; index < nodeSamples.size(); index++) {
+                    if (index > 0) {
+                        details.append(";");
+                    }
+                    details.append("[").append(nodeSamples.get(index)).append("]");
+                }
+            }
+            if (failure != null) {
+                details.append(" failure=").append(failure);
+            }
+            return details.toString();
         }
     }
 

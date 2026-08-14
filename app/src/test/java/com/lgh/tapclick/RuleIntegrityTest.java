@@ -194,6 +194,67 @@ public class RuleIntegrityTest {
     }
 
     @Test
+    public void interactiveAndDiagnosticNodeCountsAreSeparatedFromCoordinateContent() {
+        AccessibilityLayoutSnapshot textOnly = new AccessibilityLayoutSnapshot(
+                "example.app", "example.Activity", Collections.singletonList(
+                new AccessibilityLayoutSnapshot.Node(
+                        false, 3L, "ad_text", "", "广告", 0, 0, 120, 40,
+                        true, true, false, 0, 0, 7,
+                        "android.widget.TextView", "example.app")));
+        AccessibilityLayoutSnapshot clickTarget = new AccessibilityLayoutSnapshot(
+                "example.app", "example.Activity", Collections.singletonList(
+                new AccessibilityLayoutSnapshot.Node(
+                        false, 4L, "skip", "跳过", "", 900, 20, 1060, 100,
+                        true, true, false, 0x10, 0, 7,
+                        "android.widget.Button", "example.app")));
+
+        assertTrue(textOnly.hasSelectableContent());
+        assertFalse(textOnly.hasInteractiveContent());
+        assertEquals(0, textOnly.getInteractiveNodeCount());
+        assertEquals(1, textOnly.getIdentifiedNodeCount());
+        assertEquals(1, textOnly.getVisibleNodeCount());
+        assertFalse(textOnly.getNodes().get(0).toDebugSummary(0).contains("广告"));
+
+        assertTrue(clickTarget.hasInteractiveContent());
+        assertEquals(1, clickTarget.getInteractiveNodeCount());
+        assertTrue(clickTarget.getNodes().get(0).hasClickAction());
+        assertTrue(clickTarget.getNodes().get(0).toDebugSummary(0).contains("actions=0x10"));
+    }
+
+    @Test
+    public void multipleUnidentifiedNodesRemainAvailableForCoordinateSelection() {
+        List<AccessibilityLayoutSnapshot.Node> nodes = Arrays.asList(
+                new AccessibilityLayoutSnapshot.Node(
+                        false, 5L, "", "", "", 0, 0, 100, 100),
+                new AccessibilityLayoutSnapshot.Node(
+                        false, 6L, "", "", "", 100, 100, 200, 200));
+        AccessibilityLayoutSnapshot snapshot = new AccessibilityLayoutSnapshot(
+                "example.app", "example.Activity", nodes);
+
+        assertTrue(snapshot.hasSelectableContent());
+        assertFalse(snapshot.hasInteractiveContent());
+    }
+
+    @Test
+    public void duplicateNodeKeepsTheRicherAccessibilityMetadata() {
+        AccessibilityLayoutSnapshot snapshot = new AccessibilityLayoutSnapshot(
+                "example.app", "example.Activity", Arrays.asList(
+                new AccessibilityLayoutSnapshot.Node(
+                        false, 9L, "skip", "", "", 900, 20, 1060, 100,
+                        false, true, false, 0, 0, 3,
+                        "android.view.View", "example.app"),
+                new AccessibilityLayoutSnapshot.Node(
+                        false, 9L, "skip", "跳过", "跳过广告", 900, 20, 1060, 100,
+                        true, true, false, 0x10, 0, 3,
+                        "android.widget.Button", "example.app")));
+
+        assertEquals(1, snapshot.getNodes().size());
+        assertTrue(snapshot.hasInteractiveContent());
+        assertEquals("跳过广告", snapshot.getNodes().get(0).getText());
+        assertTrue(snapshot.getNodes().get(0).hasClickAction());
+    }
+
+    @Test
     public void releaseRuntimeLogRemainsACompactSummary() {
         String summary = RuntimeLogFormatter.formatRuleSummary(
                 "widget", 12L, "example.app", "example.Activity", "Text 匹配", "点击已执行");
