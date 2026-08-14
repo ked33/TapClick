@@ -11,11 +11,13 @@ import com.lgh.tapclick.mybean.AppDescribe;
 import com.lgh.tapclick.mybean.Coordinate;
 import com.lgh.tapclick.mybean.Regulation;
 import com.lgh.tapclick.mybean.Widget;
+import com.lgh.tapclick.myclass.AccessibilityLayoutSnapshot;
 import com.lgh.tapclick.myfunction.RuntimeLogFormatter;
 import com.lgh.tapclick.myfunction.WidgetScanPolicy;
 
 import org.junit.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -149,6 +151,28 @@ public class RuleIntegrityTest {
         assertTrue(WidgetScanPolicy.shouldEvaluate(repeatable, true, false));
         assertFalse(WidgetScanPolicy.shouldEvaluate(back, true, false));
         assertFalse(WidgetScanPolicy.shouldEvaluate(repeatable, false, true));
+    }
+
+    @Test
+    public void accessibilityLayoutSnapshotIsImmutableAndLargestNodesComeFirst() {
+        List<AccessibilityLayoutSnapshot.Node> source = new ArrayList<>();
+        source.add(new AccessibilityLayoutSnapshot.Node(
+                false, 1L, "small", "", "", 0, 0, 10, 10));
+        source.add(new AccessibilityLayoutSnapshot.Node(
+                true, 2L, "large", "跳过", "跳过广告", 0, 0, 30, 20));
+
+        AccessibilityLayoutSnapshot snapshot = new AccessibilityLayoutSnapshot(
+                "example.app", "example.AdActivity", source);
+        source.clear();
+
+        assertEquals("example.app", snapshot.getAppPackage());
+        assertEquals("example.AdActivity", snapshot.getAppActivity());
+        assertEquals(2, snapshot.getNodes().size());
+        assertEquals(600L, snapshot.getNodes().get(0).getArea());
+        assertEquals("large", snapshot.getNodes().get(0).getViewId());
+        assertThrows(UnsupportedOperationException.class,
+                () -> snapshot.getNodes().add(new AccessibilityLayoutSnapshot.Node(
+                        false, 3L, "", "", "", 0, 0, 1, 1)));
     }
 
     @Test

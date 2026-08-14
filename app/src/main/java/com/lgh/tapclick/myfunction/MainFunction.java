@@ -23,6 +23,8 @@ import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.util.TypedValue;
@@ -39,6 +41,7 @@ import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.SeekBar;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.core.content.ContextCompat;
 
@@ -56,6 +59,7 @@ import com.lgh.tapclick.myactivity.MainActivity;
 import com.lgh.tapclick.mybean.AppDescribe;
 import com.lgh.tapclick.mybean.Coordinate;
 import com.lgh.tapclick.mybean.Widget;
+import com.lgh.tapclick.myclass.AccessibilityLayoutSnapshot;
 import com.lgh.tapclick.myclass.DataDao;
 import com.lgh.tapclick.myclass.MyApplication;
 import com.lgh.tapclick.myclass.PackageCatalog;
@@ -64,7 +68,6 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -81,12 +84,12 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
-import cn.hutool.core.collection.ListUtil;
 import cn.hutool.core.util.StrUtil;
 
 /**
@@ -106,6 +109,8 @@ public class MainFunction {
     private volatile Map<String, AppDescribe> appDescribeMap;
     private final ScheduledThreadPoolExecutor executorServiceMain;
     private final ScheduledThreadPoolExecutor executorServiceSub;
+    private final ScheduledThreadPoolExecutor executorServiceCapture;
+    private final Handler mainHandler;
     private final Set<Widget> alreadyClickSet;
     private final Set<Widget> debounceSet;
     private final LinkedList<String> logList;
@@ -114,6 +119,8 @@ public class MainFunction {
     private final Object serviceInfoLock;
     private final Object pageTaskLock;
     private final Set<ScheduledFuture<?>> pageTaskFutures;
+    private final AtomicLong layoutCaptureGeneration;
+    private final AtomicBoolean quickCaptureInProgress;
     private volatile AppDescribe appDescribe;
     private volatile String currentPackage;
     private volatile String currentPackageSub;
@@ -142,7 +149,7 @@ public class MainFunction {
     private ViewAddDataBinding addDataBinding;
     private ViewWidgetSelectBinding widgetSelectBinding;
     private ImageView viewClickPosition;
-    private Set<String> pkgSuggestNotOnList;
+    private volatile Set<String> pkgSuggestNotOnList;
     private View ignoreView;
     private WindowManager.LayoutParams dbClickLp;
     private View dbClickView;
@@ -157,8 +164,16 @@ public class MainFunction {
                 runnable -> new Thread(runnable, "TapClick-WidgetScanner"));
         executorServiceSub = new ScheduledThreadPoolExecutor(1,
                 runnable -> new Thread(runnable, "TapClick-Actions"));
+        AtomicInteger captureThreadNumber = new AtomicInteger();
+        executorServiceCapture = new ScheduledThreadPoolExecutor(2,
+                runnable -> new Thread(runnable,
+                        "TapClick-Capture-" + captureThreadNumber.incrementAndGet()));
         executorServiceMain.setRemoveOnCancelPolicy(true);
         executorServiceSub.setRemoveOnCancelPolicy(true);
+        executorServiceCapture.setRemoveOnCancelPolicy(true);
+        executorServiceCapture.setKeepAliveTime(30, TimeUnit.SECONDS);
+        executorServiceCapture.allowCoreThreadTimeOut(true);
+        mainHandler = new Handler(Looper.getMainLooper());
         simpleDateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT);
         debugGson = BuildConfig.DEBUG ? new GsonBuilder().setPrettyPrinting().create() : null;
         appDescribe = new AppDescribe();
@@ -169,6 +184,8 @@ public class MainFunction {
         serviceInfoLock = new Object();
         pageTaskLock = new Object();
         pageTaskFutures = new HashSet<>();
+        layoutCaptureGeneration = new AtomicLong();
+        quickCaptureInProgress = new AtomicBoolean(false);
         closed = new AtomicBoolean(false);
         dataDao = MyApplication.dataDao;
         currentPackage = StrUtil.EMPTY;
@@ -178,6 +195,7 @@ public class MainFunction {
         preActivity = StrUtil.EMPTY;
         coordinateSetMap = Collections.emptyMap();
         widgetSetMap = Collections.emptyMap();
+        pkgSuggestNotOnList = Collections.emptySet();
         runtimeLoggingEnabled = MyUtils.getRuntimeLoggingEnabled();
     }
 
@@ -195,6 +213,7 @@ public class MainFunction {
             receiverRegistered = true;
         }
         executorServiceSub.execute(this::getRunningData);
+        executorServiceCapture.execute(this::preloadPackageCatalog);
         keepAliveByNotification(MyUtils.getKeepAliveByNotification());
         keepAliveByFloatingWindow(MyUtils.getKeepAliveByFloatingWindow());
         showDbClickFloating(MyUtils.getDbClickEnable());
@@ -377,7 +396,11 @@ public class MainFunction {
     }
 
     public void onConfigurationChanged(Configuration newConfig) {
+        layoutCaptureGeneration.incrementAndGet();
+        quickCaptureInProgress.set(false);
         if (addDataBinding != null && viewClickPosition != null && widgetSelectBinding != null) {
+            addDataBinding.switchWid.setEnabled(true);
+            addDataBinding.saveWid.setEnabled(false);
             DisplayMetrics metrics = new DisplayMetrics();
             windowManager.getDefaultDisplay().getRealMetrics(metrics);
             aParams.x = (metrics.widthPixels - aParams.width) / 2;
@@ -397,6 +420,8 @@ public class MainFunction {
                 text.setText("请重新刷新布局");
                 widgetSelectBinding.frame.removeAllViews();
                 widgetSelectBinding.frame.addView(text, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT, Gravity.CENTER));
+            } else {
+                addDataBinding.switchWid.setText("显示布局");
             }
         }
         if (dbClickView != null) {
@@ -712,34 +737,6 @@ public class MainFunction {
     }
 
     /**
-     * 查找所有
-     * 的控件
-     */
-    private List<AccessibilityNodeInfo> findAllNode(AccessibilityNodeInfo root) {
-        if (MyUtils.isModuleValid()) {
-            List<AccessibilityNodeInfo> listR = ListUtil.toList(root);
-            listR.addAll(root.findAccessibilityNodeInfosByText(null));
-            if (listR.size() > 1) {
-                return listR.stream().distinct().filter(Objects::nonNull).collect(Collectors.toList());
-            }
-        }
-        HashSet<AccessibilityNodeInfo> setR = new HashSet<>();
-        ArrayDeque<AccessibilityNodeInfo> listA = new ArrayDeque<>();
-        listA.offer(root);
-        while (!listA.isEmpty()) {
-            AccessibilityNodeInfo nodeInfo = listA.poll();
-            setR.add(nodeInfo);
-            for (int n = 0; n < nodeInfo.getChildCount(); n++) {
-                AccessibilityNodeInfo child = nodeInfo.getChild(n);
-                if (child != null) {
-                    listA.offer(child);
-                }
-            }
-        }
-        return ListUtil.toList(setR);
-    }
-
-    /**
      * 模拟
      * 点击
      */
@@ -771,13 +768,18 @@ public class MainFunction {
     /**
      * 创建规则时调用
      */
-    @SuppressLint("ClickableViewAccessibility")
     public void showAddDataWindow(boolean capture) {
-        if (closed.get()) {
+        if (capture) {
+            requestQuickLayoutCapture();
             return;
         }
-        if (pkgSuggestNotOnList == null) {
-            pkgSuggestNotOnList = PackageCatalog.getSuggestedRestrictedPackages(service);
+        showAddDataWindow((AccessibilityLayoutSnapshot) null);
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private void showAddDataWindow(AccessibilityLayoutSnapshot initialSnapshot) {
+        if (closed.get()) {
+            return;
         }
         if (viewClickPosition != null || addDataBinding != null || widgetSelectBinding != null) {
             return;
@@ -963,116 +965,9 @@ public class MainFunction {
             @Override
             public void onClick(View v) {
                 if (bParams.alpha == 0) {
-                    executorServiceMain.execute(new Runnable() {
-                        @Override
-                        public void run() {
-                            AccessibilityNodeInfo root = service.getRootInActiveWindow();
-                            if (root == null) {
-                                return;
-                            }
-                            List<AccessibilityWindowInfo> windowInfoList = service.getWindows();
-                            Collections.reverse(windowInfoList);
-                            if (windowInfoList.isEmpty()) {
-                                return;
-                            }
-                            ArrayList<AccessibilityNodeInfo> nodeList = new ArrayList<>();
-                            for (AccessibilityWindowInfo windowInfo : windowInfoList) {
-                                AccessibilityNodeInfo nodeInfo = windowInfo.getRoot();
-                                if (TextUtils.equals(nodeInfo.getPackageName(), root.getPackageName())) {
-                                    nodeList.addAll(findAllNode(nodeInfo).stream().sorted(new Comparator<AccessibilityNodeInfo>() {
-                                        @Override
-                                        public int compare(AccessibilityNodeInfo a, AccessibilityNodeInfo b) {
-                                            Rect rectA = new Rect();
-                                            Rect rectB = new Rect();
-                                            a.getBoundsInScreen(rectA);
-                                            b.getBoundsInScreen(rectB);
-                                            return rectB.width() * rectB.height() - rectA.width() * rectA.height();
-                                        }
-                                    }).collect(Collectors.toList()));
-                                }
-                            }
-                            if (nodeList.isEmpty()) {
-                                return;
-                            }
-                            v.post(new Runnable() {
-                                @Override
-                                public void run() {
-                                    View.OnClickListener onClickListener = new View.OnClickListener() {
-                                        @Override
-                                        public void onClick(View v) {
-                                            v.requestFocus();
-                                        }
-                                    };
-                                    View.OnFocusChangeListener onFocusChangeListener = new View.OnFocusChangeListener() {
-                                        final Pattern pattern = Pattern.compile("[A-Za-z0-9_.]+");
-
-                                        @Override
-                                        public void onFocusChange(View v, boolean hasFocus) {
-                                            if (hasFocus) {
-                                                AccessibilityNodeInfo nodeInfo = (AccessibilityNodeInfo) v.getTag(R.string.nodeInfo);
-                                                widgetSelect.widgetClickable = nodeInfo.isClickable();
-                                                widgetSelect.widgetRect = (Rect) v.getTag(R.string.rect);
-                                                widgetSelect.widgetNodeId = nodeInfo.getSourceNodeId();
-                                                widgetSelect.widgetViewId = StrUtil.toStringOrEmpty(nodeInfo.getViewIdResourceName());
-                                                widgetSelect.widgetDescribe = StrUtil.toStringOrEmpty(nodeInfo.getContentDescription());
-                                                widgetSelect.widgetText = StrUtil.toStringOrEmpty(nodeInfo.getText());
-                                                addDataBinding.pkgName.setText(widgetSelect.appPackage);
-                                                addDataBinding.actName.setText(widgetSelect.appActivity);
-                                                addDataBinding.saveWid.setEnabled(pattern.matcher(widgetSelect.appPackage).matches());
-                                                String clickable = "clickable:" + widgetSelect.widgetClickable;
-                                                String nodeId = "nodeId:" + widgetSelect.widgetNodeId;
-                                                String viewId = widgetSelect.widgetViewId.isEmpty() ? "" : widgetSelect.widgetViewId.contains(":id/") ? "viewId:" + widgetSelect.widgetViewId.substring(widgetSelect.widgetViewId.indexOf(":id/") + 4) : "";
-                                                String desc = widgetSelect.widgetDescribe.isEmpty() ? "" : "describe:" + widgetSelect.widgetDescribe;
-                                                String text = widgetSelect.widgetText.isEmpty() ? "" : "text:" + widgetSelect.widgetText;
-                                                addDataBinding.widget.setText(clickable + " " + nodeId + (viewId.isEmpty() ? "" : " " + viewId) + (desc.isEmpty() ? "" : " " + desc) + (text.isEmpty() ? "" : " " + text));
-                                                v.setBackgroundResource(R.drawable.node_focus);
-                                            } else {
-                                                v.setBackgroundResource(R.drawable.node);
-                                            }
-                                        }
-                                    };
-                                    for (AccessibilityNodeInfo nodeInfo : nodeList) {
-                                        Rect rect = new Rect();
-                                        nodeInfo.getBoundsInScreen(rect);
-                                        if (rect.width() > 0 && rect.height() > 0) {
-                                            FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(rect.width(), rect.height());
-                                            params.leftMargin = rect.left;
-                                            params.topMargin = rect.top;
-                                            View view = new View(service);
-                                            view.setBackgroundResource(R.drawable.node);
-                                            view.setFocusableInTouchMode(true);
-                                            view.setFocusable(true);
-                                            view.setOnClickListener(onClickListener);
-                                            view.setOnFocusChangeListener(onFocusChangeListener);
-                                            view.setTag(R.string.nodeInfo, nodeInfo);
-                                            view.setTag(R.string.rect, rect);
-                                            widgetSelectBinding.frame.addView(view, params);
-                                        }
-                                    }
-                                    bParams.alpha = 0.5f;
-                                    bParams.flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-                                            | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
-                                    windowManager.updateViewLayout(widgetSelectBinding.getRoot(), bParams);
-                                    widgetSelect.appPackage = currentPackage;
-                                    widgetSelect.appActivity = currentActivity;
-                                    addDataBinding.pkgName.setText(widgetSelect.appPackage);
-                                    addDataBinding.actName.setText(widgetSelect.appActivity);
-                                    addDataBinding.switchWid.setText("隐藏布局");
-                                }
-                            });
-                        }
-                    });
+                    requestManualLayoutCapture(widgetSelect);
                 } else {
-                    bParams.alpha = 0f;
-                    bParams.flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-                            | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
-                    windowManager.updateViewLayout(widgetSelectBinding.getRoot(), bParams);
-                    addDataBinding.saveWid.setEnabled(false);
-                    widgetSelectBinding.frame.removeAllViews();
-                    addDataBinding.switchWid.setText("显示布局");
+                    hideCapturedLayout();
                 }
             }
         });
@@ -1257,10 +1152,10 @@ public class MainFunction {
         addDataBinding.quit.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                layoutCaptureGeneration.incrementAndGet();
                 windowManager.removeViewImmediate(widgetSelectBinding.getRoot());
                 windowManager.removeViewImmediate(addDataBinding.getRoot());
                 windowManager.removeViewImmediate(viewClickPosition);
-                pkgSuggestNotOnList = null;
                 widgetSelectBinding = null;
                 addDataBinding = null;
                 viewClickPosition = null;
@@ -1270,9 +1165,302 @@ public class MainFunction {
         windowManager.addView(addDataBinding.getRoot(), aParams);
         windowManager.addView(viewClickPosition, cParams);
 
-        if (capture) {
-            addDataBinding.switchWid.callOnClick();
+        if (initialSnapshot != null) {
+            renderCapturedLayout(initialSnapshot, widgetSelect);
         }
+    }
+
+    private void preloadPackageCatalog() {
+        try {
+            Set<String> packages = PackageCatalog.getSuggestedRestrictedPackages(service);
+            if (!closed.get()) {
+                pkgSuggestNotOnList = packages;
+            }
+        } catch (RuntimeException ignored) {
+            // The warning is advisory. Rule capture must remain available if a
+            // vendor PackageManager rejects one of the catalogue queries.
+        }
+    }
+
+    private void requestQuickLayoutCapture() {
+        if (closed.get()
+                || viewClickPosition != null
+                || addDataBinding != null
+                || widgetSelectBinding != null
+                || !quickCaptureInProgress.compareAndSet(false, true)) {
+            return;
+        }
+        long captureGeneration = layoutCaptureGeneration.incrementAndGet();
+        String packageAtRequest = currentPackage;
+        String activityAtRequest = currentActivity;
+        captureLayoutAsync(packageAtRequest, activityAtRequest, snapshot -> {
+            quickCaptureInProgress.set(false);
+            if (closed.get() || captureGeneration != layoutCaptureGeneration.get()) {
+                return;
+            }
+            if (snapshot == null || snapshot.isEmpty()) {
+                Toast.makeText(service, "未捕获到当前页面控件，请重新双击", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            showAddDataWindow(snapshot);
+        });
+    }
+
+    private void requestManualLayoutCapture(Widget widgetSelect) {
+        ViewAddDataBinding requestedAddBinding = addDataBinding;
+        ViewWidgetSelectBinding requestedWidgetBinding = widgetSelectBinding;
+        if (requestedAddBinding == null || requestedWidgetBinding == null) {
+            return;
+        }
+        requestedAddBinding.switchWid.setEnabled(false);
+        requestedAddBinding.switchWid.setText("正在捕获...");
+        long captureGeneration = layoutCaptureGeneration.incrementAndGet();
+        String packageAtRequest = currentPackage;
+        String activityAtRequest = currentActivity;
+        captureLayoutAsync(packageAtRequest, activityAtRequest, snapshot -> {
+            if (closed.get()
+                    || captureGeneration != layoutCaptureGeneration.get()
+                    || requestedAddBinding != addDataBinding
+                    || requestedWidgetBinding != widgetSelectBinding) {
+                return;
+            }
+            requestedAddBinding.switchWid.setEnabled(true);
+            if (snapshot == null || snapshot.isEmpty()) {
+                requestedAddBinding.switchWid.setText("显示布局");
+                Toast.makeText(service, "未捕获到当前页面控件，请重试", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            renderCapturedLayout(snapshot, widgetSelect);
+        });
+    }
+
+    private void captureLayoutAsync(String packageAtRequest, String activityAtRequest,
+                                    LayoutCaptureCallback callback) {
+        try {
+            executorServiceCapture.execute(() -> {
+                AccessibilityLayoutSnapshot capturedSnapshot = null;
+                try {
+                    capturedSnapshot = captureCurrentLayout(
+                            packageAtRequest, activityAtRequest);
+                } catch (RuntimeException ignored) {
+                    // A window can disappear between the double tap and the
+                    // accessibility IPC. Report a failed capture on the UI thread.
+                }
+                AccessibilityLayoutSnapshot snapshot = capturedSnapshot;
+                mainHandler.post(() -> callback.onCaptured(snapshot));
+            });
+        } catch (RejectedExecutionException ignored) {
+            mainHandler.post(() -> callback.onCaptured(null));
+        }
+    }
+
+    private AccessibilityLayoutSnapshot captureCurrentLayout(String packageAtRequest,
+                                                               String activityAtRequest) {
+        if (closed.get()) {
+            return null;
+        }
+        AccessibilityNodeInfo activeRoot = service.getRootInActiveWindow();
+        if (activeRoot == null || activeRoot.getPackageName() == null) {
+            return null;
+        }
+        String capturedPackage = activeRoot.getPackageName().toString();
+        if (StrUtil.isNotBlank(packageAtRequest)
+                && !TextUtils.equals(packageAtRequest, capturedPackage)) {
+            return null;
+        }
+
+        String capturedActivity = StrUtil.isNotBlank(activityAtRequest)
+                ? activityAtRequest : currentActivity;
+        List<AccessibilityLayoutSnapshot.Node> capturedNodes = new ArrayList<>();
+        List<AccessibilityWindowInfo> windows = new ArrayList<>(service.getWindows());
+        Collections.reverse(windows);
+        for (AccessibilityWindowInfo window : windows) {
+            AccessibilityNodeInfo windowRoot = window.getRoot();
+            if (windowRoot == null
+                    || !TextUtils.equals(windowRoot.getPackageName(), capturedPackage)) {
+                continue;
+            }
+            appendCapturedNodes(windowRoot, capturedNodes);
+        }
+        if (capturedNodes.isEmpty()) {
+            appendCapturedNodes(activeRoot, capturedNodes);
+        }
+        if (capturedNodes.isEmpty()) {
+            return null;
+        }
+
+        return new AccessibilityLayoutSnapshot(
+                capturedPackage, capturedActivity, capturedNodes);
+    }
+
+    private void appendCapturedNodes(AccessibilityNodeInfo root,
+                                     List<AccessibilityLayoutSnapshot.Node> capturedNodes) {
+        ArrayDeque<AccessibilityNodeInfo> pendingNodes = new ArrayDeque<>();
+        Set<AccessibilityNodeInfo> visitedNodes = new HashSet<>();
+        pendingNodes.offer(root);
+        if (MyUtils.isModuleValid()) {
+            try {
+                for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText(null)) {
+                    if (node != null) {
+                        pendingNodes.offer(node);
+                    }
+                }
+            } catch (RuntimeException ignored) {
+                // Fall back to the regular child traversal below.
+            }
+        }
+
+        while (!pendingNodes.isEmpty()) {
+            AccessibilityNodeInfo node = pendingNodes.poll();
+            if (node == null || !visitedNodes.add(node)) {
+                continue;
+            }
+            try {
+                Rect bounds = new Rect();
+                node.getBoundsInScreen(bounds);
+                if (bounds.width() > 0 && bounds.height() > 0) {
+                    capturedNodes.add(new AccessibilityLayoutSnapshot.Node(
+                            node.isClickable(),
+                            node.getSourceNodeId(),
+                            StrUtil.toStringOrEmpty(node.getViewIdResourceName()),
+                            StrUtil.toStringOrEmpty(node.getContentDescription()),
+                            StrUtil.toStringOrEmpty(node.getText()),
+                            bounds.left,
+                            bounds.top,
+                            bounds.right,
+                            bounds.bottom));
+                }
+            } catch (RuntimeException ignored) {
+                // A node can become stale while its page is being dismissed.
+                // Keep the properties already copied from the remaining nodes.
+            }
+            try {
+                for (int childIndex = 0; childIndex < node.getChildCount(); childIndex++) {
+                    AccessibilityNodeInfo child = node.getChild(childIndex);
+                    if (child != null) {
+                        pendingNodes.offer(child);
+                    }
+                }
+            } catch (RuntimeException ignored) {
+                // The copied properties remain valid even if child lookup fails.
+            }
+        }
+    }
+
+    private void renderCapturedLayout(AccessibilityLayoutSnapshot snapshot, Widget widgetSelect) {
+        ViewAddDataBinding currentAddBinding = addDataBinding;
+        ViewWidgetSelectBinding currentWidgetBinding = widgetSelectBinding;
+        if (currentAddBinding == null || currentWidgetBinding == null || bParams == null) {
+            return;
+        }
+
+        widgetSelect.appPackage = snapshot.getAppPackage();
+        widgetSelect.appActivity = snapshot.getAppActivity();
+        currentAddBinding.pkgName.setText(widgetSelect.appPackage);
+        currentAddBinding.actName.setText(widgetSelect.appActivity);
+        currentAddBinding.saveWid.setEnabled(false);
+        currentWidgetBinding.frame.removeAllViews();
+
+        View.OnClickListener onClickListener = view -> view.requestFocus();
+        View.OnFocusChangeListener onFocusChangeListener = new View.OnFocusChangeListener() {
+            final Pattern packagePattern = Pattern.compile("[A-Za-z0-9_.]+");
+
+            @Override
+            public void onFocusChange(View view, boolean hasFocus) {
+                if (currentAddBinding != addDataBinding
+                        || currentWidgetBinding != widgetSelectBinding) {
+                    return;
+                }
+                if (!hasFocus) {
+                    view.setBackgroundResource(R.drawable.node);
+                    return;
+                }
+                AccessibilityLayoutSnapshot.Node node =
+                        (AccessibilityLayoutSnapshot.Node) view.getTag(R.string.nodeInfo);
+                widgetSelect.widgetClickable = node.isClickable();
+                widgetSelect.widgetRect = new Rect(
+                        node.getLeft(),
+                        node.getTop(),
+                        node.getLeft() + node.getWidth(),
+                        node.getTop() + node.getHeight());
+                widgetSelect.widgetNodeId = node.getNodeId();
+                widgetSelect.widgetViewId = node.getViewId();
+                widgetSelect.widgetDescribe = node.getDescription();
+                widgetSelect.widgetText = node.getText();
+                currentAddBinding.pkgName.setText(widgetSelect.appPackage);
+                currentAddBinding.actName.setText(widgetSelect.appActivity);
+                currentAddBinding.saveWid.setEnabled(
+                        packagePattern.matcher(widgetSelect.appPackage).matches());
+                String clickable = "clickable:" + widgetSelect.widgetClickable;
+                String nodeId = "nodeId:" + widgetSelect.widgetNodeId;
+                String viewId = widgetSelect.widgetViewId.isEmpty()
+                        ? "" : widgetSelect.widgetViewId.contains(":id/")
+                        ? "viewId:" + widgetSelect.widgetViewId.substring(
+                        widgetSelect.widgetViewId.indexOf(":id/") + 4) : "";
+                String desc = widgetSelect.widgetDescribe.isEmpty()
+                        ? "" : "describe:" + widgetSelect.widgetDescribe;
+                String text = widgetSelect.widgetText.isEmpty()
+                        ? "" : "text:" + widgetSelect.widgetText;
+                currentAddBinding.widget.setText(clickable + " " + nodeId
+                        + (viewId.isEmpty() ? "" : " " + viewId)
+                        + (desc.isEmpty() ? "" : " " + desc)
+                        + (text.isEmpty() ? "" : " " + text));
+                view.setBackgroundResource(R.drawable.node_focus);
+            }
+        };
+
+        int renderedNodeCount = 0;
+        for (AccessibilityLayoutSnapshot.Node node : snapshot.getNodes()) {
+            if (node.getWidth() <= 0 || node.getHeight() <= 0) {
+                continue;
+            }
+            FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                    node.getWidth(), node.getHeight());
+            params.leftMargin = node.getLeft();
+            params.topMargin = node.getTop();
+            View view = new View(service);
+            view.setBackgroundResource(R.drawable.node);
+            view.setFocusableInTouchMode(true);
+            view.setFocusable(true);
+            view.setOnClickListener(onClickListener);
+            view.setOnFocusChangeListener(onFocusChangeListener);
+            view.setTag(R.string.nodeInfo, node);
+            currentWidgetBinding.frame.addView(view, params);
+            renderedNodeCount++;
+        }
+        currentAddBinding.switchWid.setEnabled(true);
+        if (renderedNodeCount == 0) {
+            currentAddBinding.switchWid.setText("显示布局");
+            Toast.makeText(service, "当前页面没有可选择的控件", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        bParams.alpha = 0.5f;
+        bParams.flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+        windowManager.updateViewLayout(currentWidgetBinding.getRoot(), bParams);
+        currentAddBinding.switchWid.setText("隐藏布局");
+    }
+
+    private void hideCapturedLayout() {
+        if (addDataBinding == null || widgetSelectBinding == null || bParams == null) {
+            return;
+        }
+        bParams.alpha = 0f;
+        bParams.flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+        windowManager.updateViewLayout(widgetSelectBinding.getRoot(), bParams);
+        addDataBinding.saveWid.setEnabled(false);
+        widgetSelectBinding.frame.removeAllViews();
+        addDataBinding.switchWid.setEnabled(true);
+        addDataBinding.switchWid.setText("显示布局");
+    }
+
+    private interface LayoutCaptureCallback {
+        void onCaptured(AccessibilityLayoutSnapshot snapshot);
     }
 
     private void showWarningDialog(Runnable onSureRun, String message) {
@@ -1649,12 +1837,16 @@ public class MainFunction {
             return;
         }
         pageGeneration++;
+        layoutCaptureGeneration.incrementAndGet();
+        quickCaptureInProgress.set(false);
         cancelAllPageTasks();
         cancelFuture(futureWidget);
         cancelFuture(futureCoordinate);
         setContentChangeEventsEnabled(false);
         executorServiceMain.shutdownNow();
         executorServiceSub.shutdownNow();
+        executorServiceCapture.shutdownNow();
+        mainHandler.removeCallbacksAndMessages(null);
         if (receiverRegistered && myBroadcastReceiver != null) {
             try {
                 service.unregisterReceiver(myBroadcastReceiver);
