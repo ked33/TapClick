@@ -70,7 +70,6 @@ android {
 }
 
 dependencies {
-    compileOnly files('libs/classes4-dex2jar.jar')
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.10.0'
     implementation 'com.google.code.gson:gson:2.10.1'
@@ -92,7 +91,8 @@ gradle.projectsEvaluated {
         configureEach {
             Set<File> fileSet = options.bootstrapClasspath.getFiles()
             List<File> newFileList = new ArrayList<>()
-            // 使用 projectDir 相对路径，兼容 Windows / Linux CI
+            // 隐藏 API 仅供 javac 编译；不要声明为依赖，否则完整框架 jar 会污染 R8 的库输入。
+            // 使用 projectDir 相对路径，兼容 Windows / Linux CI。
             newFileList.add(new File(project.projectDir, "libs/classes4-dex2jar.jar"))
             newFileList.addAll(fileSet)
             options.bootstrapClasspath = files(newFileList.toArray())
