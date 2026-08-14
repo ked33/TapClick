@@ -25,6 +25,7 @@ import android.view.inputmethod.InputMethodInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Toast;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.appcompat.widget.SwitchCompat;
 import androidx.core.content.FileProvider;
 
@@ -84,6 +85,15 @@ public class EditDataActivity extends BaseActivity {
         inflater = getLayoutInflater();
         editDataBinding = ActivityEditDataBinding.inflate(inflater);
         setContentView(editDataBinding.getRoot());
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                Intent intent = getIntent();
+                intent.putExtra("packageName", packageName);
+                setResult(RESULT_OK, intent);
+                finish();
+            }
+        });
 
         context = getApplicationContext();
         dataDao = MyApplication.dataDao;
@@ -675,14 +685,6 @@ public class EditDataActivity extends BaseActivity {
         if (myAppConfig != null && myAppConfig.autoHideOnTaskList) {
             MyUtils.setExcludeFromRecents(true);
         }
-    }
-
-    @Override
-    public void onBackPressed() {
-        Intent intent = getIntent();
-        intent.putExtra("packageName", packageName);
-        setResult(RESULT_OK, intent);
-        super.onBackPressed();
     }
 
     private void showEditShareFileNameDialog(String strRegulation) {

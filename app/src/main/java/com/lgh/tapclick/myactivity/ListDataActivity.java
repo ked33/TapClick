@@ -26,6 +26,7 @@ import android.view.inputmethod.InputMethodManager;
 import android.widget.ArrayAdapter;
 import android.widget.Toast;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.activity.result.ActivityResult;
 import androidx.activity.result.ActivityResultCallback;
 import androidx.activity.result.ActivityResultLauncher;
@@ -88,6 +89,20 @@ public class ListDataActivity extends BaseActivity {
         context = getApplicationContext();
         dataDao = MyApplication.dataDao;
         packageManager = getPackageManager();
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (!TextUtils.isEmpty(listDataBinding.searchBox.getText())) {
+                    listDataBinding.searchBox.setText(null);
+                    return;
+                }
+                if (listDataBinding.llSelect.getVisibility() == View.VISIBLE) {
+                    listDataBinding.btCancel.callOnClick();
+                    return;
+                }
+                finish();
+            }
+        });
 
         itemResultLauncher = registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), new ActivityResultCallback<ActivityResult>() {
             @Override
@@ -436,19 +451,6 @@ public class ListDataActivity extends BaseActivity {
         listDataBinding.recyclerView.setVisibility(View.VISIBLE);
         listDataBinding.searchBox.setVisibility(View.VISIBLE);
         listDataBinding.progress.setVisibility(View.INVISIBLE);
-    }
-
-    @Override
-    public void onBackPressed() {
-        if (!TextUtils.isEmpty(listDataBinding.searchBox.getText())) {
-            listDataBinding.searchBox.setText(null);
-            return;
-        }
-        if (listDataBinding.llSelect.getVisibility() == View.VISIBLE) {
-            listDataBinding.btCancel.callOnClick();
-            return;
-        }
-        super.onBackPressed();
     }
 
     private void showEditShareFileNameDialog(String strRegulation) {

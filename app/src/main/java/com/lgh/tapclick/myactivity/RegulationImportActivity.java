@@ -13,6 +13,7 @@ import android.view.ViewGroup;
 import android.widget.Filter;
 import android.widget.Toast;
 
+import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.NonNull;
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -45,6 +46,16 @@ public class RegulationImportActivity extends BaseActivity {
         regulationImportBinding.recyclerView.setAdapter(myAdapter);
         regulationImportBinding.btImport.setEnabled(false);
         regulationImportBinding.searchBox.setEnabled(false);
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                if (!TextUtils.isEmpty(regulationImportBinding.searchBox.getText())) {
+                    regulationImportBinding.searchBox.setText(null);
+                    return;
+                }
+                finish();
+            }
+        });
 
         Filter filter = createFilter();
         regulationImportBinding.searchBox.addTextChangedListener(new TextWatcher() {
@@ -205,15 +216,6 @@ public class RegulationImportActivity extends BaseActivity {
 
     private void updateSelectedCount() {
         regulationImportBinding.tvSelectedNum.setText(String.format(Locale.ROOT, "已选%d项", importList.size()));
-    }
-
-    @Override
-    public void onBackPressed() {
-        if (!TextUtils.isEmpty(regulationImportBinding.searchBox.getText())) {
-            regulationImportBinding.searchBox.setText(null);
-            return;
-        }
-        super.onBackPressed();
     }
 
     static class RegulationItem {

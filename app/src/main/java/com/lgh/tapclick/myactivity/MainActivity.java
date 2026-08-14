@@ -22,6 +22,8 @@ import android.widget.AdapterView;
 import android.widget.BaseAdapter;
 import android.widget.Toast;
 
+import androidx.activity.OnBackPressedCallback;
+
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.lgh.tapclick.R;
@@ -64,6 +66,12 @@ public class MainActivity extends BaseActivity {
         handler = new Handler(Looper.getMainLooper());
         mainBinding = ActivityMainBinding.inflate(inflater = getLayoutInflater());
         setContentView(mainBinding.getRoot());
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                finishAndRemoveTask();
+            }
+        });
 
         final List<Resource> source = new ArrayList<>();
         source.add(new Resource("授权管理", R.drawable.authorization));
@@ -148,12 +156,6 @@ public class MainActivity extends BaseActivity {
                 refreshAccessibilityServiceStatus();
             }
         });
-    }
-
-    @Override
-    public void onBackPressed() {
-        super.onBackPressed();
-        finishAndRemoveTask();
     }
 
     private void refreshAccessibilityServiceStatus() {
