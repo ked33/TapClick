@@ -18,17 +18,22 @@ import android.content.IntentFilter;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
+import android.graphics.Bitmap;
 import android.graphics.Color;
+import android.graphics.ColorSpace;
 import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
+import android.hardware.HardwareBuffer;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.Display;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
@@ -104,16 +109,16 @@ import cn.hutool.core.util.StrUtil;
  */
 
 public class MainFunction {
-    private static final long QUICK_CAPTURE_PANEL_TIMEOUT_MILLIS = 250L;
     private static final long QUICK_CAPTURE_BUDGET_MILLIS = 180L;
     private static final int QUICK_CAPTURE_MAX_NODES = 400;
     private static final long QUICK_CAPTURE_MODULE_RETRY_MILLIS = 700L;
     private static final long QUICK_CAPTURE_WINDOW_FALLBACK_MILLIS = 1200L;
     private static final int QUICK_CAPTURE_FALLBACK_MAX_NODES = 1200;
     private static final int QUICK_CAPTURE_SPARSE_NODE_THRESHOLD = 8;
-    private static final long QUICK_CAPTURE_REFRESH_FIRST_DELAY_MILLIS = 450L;
+    private static final long QUICK_CAPTURE_REFRESH_FIRST_DELAY_MILLIS = 300L;
     private static final long QUICK_CAPTURE_REFRESH_SECOND_DELAY_MILLIS = 900L;
     private static final int QUICK_CAPTURE_MAX_REFRESH_ATTEMPTS = 2;
+    private static final long QUICK_CAPTURE_MAX_LIVE_SNAPSHOT_AGE_MILLIS = 2400L;
     private static final int CAPTURE_NODE_DIAGNOSTIC_LIMIT = 6;
     private static final Pattern PACKAGE_NAME_PATTERN = Pattern.compile("[A-Za-z0-9_.]+");
     private static final long MANUAL_CAPTURE_BUDGET_MILLIS = 1500L;
@@ -167,7 +172,13 @@ public class MainFunction {
     private ViewAddDataBinding addDataBinding;
     private ViewWidgetSelectBinding widgetSelectBinding;
     private volatile Widget activeWidgetSelection;
+    private volatile Coordinate activeCoordinateSelection;
     private volatile boolean captureLayoutHiddenByUser;
+    private volatile boolean frozenCoordinateSelected;
+    private final AtomicReference<FrozenScreenCapture> pendingFrozenCapture = new AtomicReference<>();
+    private FrozenScreenCapture activeFrozenCapture;
+    private ImageView frozenCaptureView;
+    private View frozenCoordinateMarker;
     private ImageView viewClickPosition;
     private volatile Set<String> pkgSuggestNotOnList;
     private View ignoreView;
@@ -185,7 +196,9 @@ public class MainFunction {
         executorServiceSub = new ScheduledThreadPoolExecutor(1,
                 runnable -> new Thread(runnable, "TapClick-Actions"));
         AtomicInteger captureThreadNumber = new AtomicInteger();
-        executorServiceCapture = new ScheduledThreadPoolExecutor(2,
+        // Keep one worker available for the screenshot callback while two
+        // accessibility IPC captures may be blocked in vendor code.
+        executorServiceCapture = new ScheduledThreadPoolExecutor(3,
                 runnable -> new Thread(runnable,
                         "TapClick-Capture-" + captureThreadNumber.incrementAndGet()));
         executorServiceMain.setRemoveOnCancelPolicy(true);
@@ -421,6 +434,8 @@ public class MainFunction {
     public void onConfigurationChanged(Configuration newConfig) {
         layoutCaptureGeneration.incrementAndGet();
         quickCaptureInProgress.set(false);
+        frozenCoordinateSelected = false;
+        clearFrozenScreenCapture();
         if (addDataBinding != null && viewClickPosition != null && widgetSelectBinding != null) {
             addDataBinding.switchWid.setEnabled(true);
             addDataBinding.saveWid.setEnabled(false);
@@ -830,9 +845,11 @@ public class MainFunction {
             return;
         }
         captureLayoutHiddenByUser = false;
+        frozenCoordinateSelected = false;
         final Widget widgetSelect = new Widget();
         activeWidgetSelection = widgetSelect;
         final Coordinate coordinateSelect = new Coordinate();
+        activeCoordinateSelection = coordinateSelect;
         final LayoutInflater inflater = LayoutInflater.from(service);
 
         addDataBinding = ViewAddDataBinding.inflate(inflater);
@@ -1012,7 +1029,9 @@ public class MainFunction {
             @Override
             public void onClick(View v) {
                 if (bParams.alpha == 0) {
-                    requestManualLayoutCapture(widgetSelect);
+                    if (!showFrozenCaptureLayout()) {
+                        requestManualLayoutCapture(widgetSelect);
+                    }
                 } else {
                     hideCapturedLayout();
                 }
@@ -1207,7 +1226,10 @@ public class MainFunction {
                 addDataBinding = null;
                 viewClickPosition = null;
                 activeWidgetSelection = null;
+                activeCoordinateSelection = null;
                 captureLayoutHiddenByUser = false;
+                frozenCoordinateSelected = false;
+                clearFrozenScreenCapture();
             }
         });
         windowManager.addView(widgetSelectBinding.getRoot(), bParams);
@@ -1216,6 +1238,8 @@ public class MainFunction {
 
         if (initialSnapshot != null) {
             renderCapturedLayout(initialSnapshot, widgetSelect);
+        } else {
+            showFrozenCaptureLayout();
         }
     }
 
@@ -1231,6 +1255,306 @@ public class MainFunction {
         }
     }
 
+    @SuppressLint("NewApi")
+    private void requestFrozenScreenCapture(long captureGeneration,
+                                            String packageAtRequest,
+                                            String activityAtRequest,
+                                            long requestStartedNanos) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            addCaptureLog("screenCapture", packageAtRequest, true,
+                    elapsedMillis(requestStartedNanos), "outcome=unsupported sdk=" + Build.VERSION.SDK_INT);
+            return;
+        }
+        long requestStartedUptimeMillis = SystemClock.uptimeMillis();
+        try {
+            service.takeScreenshot(Display.DEFAULT_DISPLAY, executorServiceCapture,
+                    new AccessibilityService.TakeScreenshotCallback() {
+                        @Override
+                        public void onSuccess(AccessibilityService.ScreenshotResult screenshotResult) {
+                            Bitmap bitmap = copyScreenshotBitmap(screenshotResult);
+                            if (bitmap == null) {
+                                addCaptureLog("screenCapture", packageAtRequest, true,
+                                        elapsedMillis(requestStartedNanos), "outcome=decodeFailed");
+                                return;
+                            }
+                            long capturedAfterMillis = Math.max(0L,
+                                    screenshotResult.getTimestamp()
+                                            - requestStartedUptimeMillis);
+                            if (capturedAfterMillis
+                                    > QUICK_CAPTURE_MAX_LIVE_SNAPSHOT_AGE_MILLIS) {
+                                bitmap.recycle();
+                                addCaptureLog("screenCapture", packageAtRequest, true,
+                                        elapsedMillis(requestStartedNanos),
+                                        "outcome=stale captureAgeMs=" + capturedAfterMillis);
+                                return;
+                            }
+                            FrozenScreenCapture capture = new FrozenScreenCapture(
+                                    bitmap, packageAtRequest, activityAtRequest,
+                                    captureGeneration, requestStartedNanos,
+                                    capturedAfterMillis);
+                            if (!registerPendingFrozenScreenCapture(capture)) {
+                                return;
+                            }
+                            boolean posted = mainHandler.post(() -> {
+                                if (pendingFrozenCapture.compareAndSet(capture, null)) {
+                                    installFrozenScreenCapture(capture);
+                                }
+                            });
+                            if (!posted && pendingFrozenCapture.compareAndSet(capture, null)) {
+                                capture.recycle();
+                            }
+                        }
+
+                        @Override
+                        public void onFailure(int errorCode) {
+                            addCaptureLog("screenCapture", packageAtRequest, true,
+                                    elapsedMillis(requestStartedNanos),
+                                    "outcome=failed error=" + errorCode);
+                        }
+                    });
+        } catch (RuntimeException exception) {
+            addCaptureLog("screenCapture", packageAtRequest, true,
+                    elapsedMillis(requestStartedNanos),
+                    "outcome=exception error=" + exception.getClass().getSimpleName());
+        }
+    }
+
+    private boolean registerPendingFrozenScreenCapture(FrozenScreenCapture capture) {
+        while (true) {
+            if (closed.get() || capture.generation != layoutCaptureGeneration.get()) {
+                capture.recycle();
+                return false;
+            }
+            FrozenScreenCapture previousPending = pendingFrozenCapture.get();
+            if (previousPending != null
+                    && previousPending.generation > capture.generation) {
+                capture.recycle();
+                return false;
+            }
+            if (!pendingFrozenCapture.compareAndSet(previousPending, capture)) {
+                continue;
+            }
+            if (previousPending != null && previousPending != capture) {
+                previousPending.recycle();
+            }
+            return true;
+        }
+    }
+
+    @SuppressLint("NewApi")
+    private static Bitmap copyScreenshotBitmap(
+            AccessibilityService.ScreenshotResult screenshotResult) {
+        HardwareBuffer hardwareBuffer = screenshotResult == null
+                ? null : screenshotResult.getHardwareBuffer();
+        if (hardwareBuffer == null) {
+            return null;
+        }
+        try {
+            ColorSpace colorSpace = screenshotResult.getColorSpace();
+            if (colorSpace == null) {
+                colorSpace = ColorSpace.get(ColorSpace.Named.SRGB);
+            }
+            Bitmap hardwareBitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, colorSpace);
+            return hardwareBitmap == null
+                    ? null : hardwareBitmap.copy(Bitmap.Config.ARGB_8888, false);
+        } catch (RuntimeException | OutOfMemoryError ignored) {
+            return null;
+        } finally {
+            hardwareBuffer.close();
+        }
+    }
+
+    private void installFrozenScreenCapture(FrozenScreenCapture capture) {
+        if (capture == null) {
+            return;
+        }
+        if (closed.get() || capture.generation != layoutCaptureGeneration.get()) {
+            capture.recycle();
+            return;
+        }
+        FrozenScreenCapture previousCapture = activeFrozenCapture;
+        activeFrozenCapture = capture;
+        if (previousCapture != null && previousCapture != capture) {
+            previousCapture.recycle();
+        }
+        addCaptureLog("screenCapture", capture.appPackage, true,
+                elapsedMillis(capture.requestStartedNanos),
+                "outcome=ready size=" + capture.bitmap.getWidth()
+                        + "x" + capture.bitmap.getHeight()
+                        + " captureAgeMs=" + capture.capturedAfterMillis);
+        if (!captureLayoutHiddenByUser
+                && addDataBinding != null
+                && widgetSelectBinding != null
+                && activeCoordinateSelection != null) {
+            showFrozenCaptureLayout();
+        }
+    }
+
+    private boolean showFrozenCaptureLayout() {
+        FrozenScreenCapture capture = activeFrozenCapture;
+        ViewAddDataBinding currentAddBinding = addDataBinding;
+        ViewWidgetSelectBinding currentWidgetBinding = widgetSelectBinding;
+        Coordinate coordinateSelect = activeCoordinateSelection;
+        if (capture == null
+                || capture.bitmap.isRecycled()
+                || currentAddBinding == null
+                || currentWidgetBinding == null
+                || coordinateSelect == null
+                || bParams == null) {
+            return false;
+        }
+        if (frozenCaptureView == null || frozenCaptureView.getParent() != currentWidgetBinding.frame) {
+            ImageView screenshotView = new ImageView(service);
+            screenshotView.setScaleType(ImageView.ScaleType.FIT_XY);
+            screenshotView.setImageBitmap(capture.bitmap);
+            screenshotView.setContentDescription("冻结画面坐标选择");
+            screenshotView.setClickable(true);
+            screenshotView.setOnTouchListener((view, event) -> {
+                if (event.getAction() == MotionEvent.ACTION_UP) {
+                    view.performClick();
+                    selectFrozenCoordinate(activeFrozenCapture,
+                            Math.round(event.getRawX()), Math.round(event.getRawY()));
+                }
+                return true;
+            });
+            currentWidgetBinding.frame.addView(screenshotView, 0,
+                    new FrameLayout.LayoutParams(
+                            FrameLayout.LayoutParams.MATCH_PARENT,
+                            FrameLayout.LayoutParams.MATCH_PARENT));
+            frozenCaptureView = screenshotView;
+        } else {
+            frozenCaptureView.setImageBitmap(capture.bitmap);
+        }
+        bParams.alpha = 1f;
+        bParams.flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+        windowManager.updateViewLayout(currentWidgetBinding.getRoot(), bParams);
+        currentAddBinding.switchWid.setEnabled(true);
+        currentAddBinding.switchWid.setText("隐藏布局");
+        Widget selectedWidget = activeWidgetSelection;
+        if (selectedWidget != null && selectedWidget.widgetRect != null) {
+            currentAddBinding.saveWid.setEnabled(PACKAGE_NAME_PATTERN.matcher(
+                    selectedWidget.appPackage == null ? "" : selectedWidget.appPackage).matches());
+        } else if (!frozenCoordinateSelected) {
+            currentAddBinding.widget.setText("未暴露可点击控件时，可直接点击冻结画面选择坐标");
+        }
+        captureLayoutHiddenByUser = false;
+        addCaptureLog("frozenRender", capture.appPackage, true,
+                elapsedMillis(capture.requestStartedNanos),
+                "size=" + capture.bitmap.getWidth() + "x" + capture.bitmap.getHeight());
+        return true;
+    }
+
+    private void selectFrozenCoordinate(FrozenScreenCapture capture, int rawX, int rawY) {
+        ViewAddDataBinding currentAddBinding = addDataBinding;
+        ViewWidgetSelectBinding currentWidgetBinding = widgetSelectBinding;
+        Coordinate coordinateSelect = activeCoordinateSelection;
+        if (capture == null
+                || capture != activeFrozenCapture
+                || currentAddBinding == null
+                || currentWidgetBinding == null
+                || coordinateSelect == null
+                || bParams == null) {
+            return;
+        }
+        int maximumX = Math.max(0, bParams.width - 1);
+        int maximumY = Math.max(0, bParams.height - 1);
+        int selectedX = Math.max(0, Math.min(rawX, maximumX));
+        int selectedY = Math.max(0, Math.min(rawY, maximumY));
+        coordinateSelect.appPackage = capture.appPackage;
+        coordinateSelect.appActivity = capture.appActivity;
+        coordinateSelect.xPosition = selectedX;
+        coordinateSelect.yPosition = selectedY;
+        Widget widgetSelect = activeWidgetSelection;
+        if (widgetSelect != null) {
+            widgetSelect.widgetClickable = false;
+            widgetSelect.widgetRect = null;
+            widgetSelect.widgetNodeId = null;
+            widgetSelect.widgetViewId = "";
+            widgetSelect.widgetDescribe = "";
+            widgetSelect.widgetText = "";
+        }
+        currentAddBinding.pkgName.setText(coordinateSelect.appPackage);
+        currentAddBinding.actName.setText(coordinateSelect.appActivity);
+        currentAddBinding.xy.setText("X轴：" + String.format("%-4d", selectedX)
+                + "    Y轴：" + String.format("%-4d", selectedY));
+        currentAddBinding.saveAim.setEnabled(
+                PACKAGE_NAME_PATTERN.matcher(coordinateSelect.appPackage).matches());
+        currentAddBinding.saveWid.setEnabled(false);
+        currentAddBinding.widget.setText("已从冻结画面选择坐标，可点击“添加坐标”保存");
+        frozenCoordinateSelected = true;
+        showFrozenCoordinateMarker(currentWidgetBinding, selectedX, selectedY);
+        addCaptureLog("frozenSelect", capture.appPackage, true,
+                elapsedMillis(capture.requestStartedNanos),
+                "x=" + selectedX + " y=" + selectedY);
+    }
+
+    private void showFrozenCoordinateMarker(ViewWidgetSelectBinding binding, int x, int y) {
+        if (binding == null || bParams == null) {
+            return;
+        }
+        if (frozenCoordinateMarker != null && frozenCoordinateMarker.getParent() == binding.frame) {
+            binding.frame.removeView(frozenCoordinateMarker);
+        }
+        int markerSize = Math.max(16,
+                Math.round(20 * service.getResources().getDisplayMetrics().density));
+        FrameLayout.LayoutParams markerParams = new FrameLayout.LayoutParams(markerSize, markerSize);
+        markerParams.leftMargin = Math.max(0,
+                Math.min(x - markerSize / 2, Math.max(0, bParams.width - markerSize)));
+        markerParams.topMargin = Math.max(0,
+                Math.min(y - markerSize / 2, Math.max(0, bParams.height - markerSize)));
+        View marker = new View(service);
+        marker.setBackgroundResource(R.drawable.node_focus);
+        marker.setClickable(false);
+        marker.setFocusable(false);
+        binding.frame.addView(marker, markerParams);
+        frozenCoordinateMarker = marker;
+    }
+
+    private void clearFrozenScreenCapture() {
+        if (frozenCaptureView != null) {
+            frozenCaptureView.setImageDrawable(null);
+            if (frozenCaptureView.getParent() instanceof FrameLayout) {
+                ((FrameLayout) frozenCaptureView.getParent()).removeView(frozenCaptureView);
+            }
+            frozenCaptureView = null;
+        }
+        if (frozenCoordinateMarker != null) {
+            if (frozenCoordinateMarker.getParent() instanceof FrameLayout) {
+                ((FrameLayout) frozenCoordinateMarker.getParent()).removeView(frozenCoordinateMarker);
+            }
+            frozenCoordinateMarker = null;
+        }
+        FrozenScreenCapture capture = activeFrozenCapture;
+        activeFrozenCapture = null;
+        if (capture != null) {
+            capture.recycle();
+        }
+        FrozenScreenCapture pendingCapture = pendingFrozenCapture.getAndSet(null);
+        if (pendingCapture != null) {
+            pendingCapture.recycle();
+        }
+    }
+
+    private boolean isQuickSnapshotTimely(long requestStartedNanos,
+                                          long captureCompletedNanos) {
+        return elapsedMillis(requestStartedNanos, captureCompletedNanos)
+                <= QUICK_CAPTURE_MAX_LIVE_SNAPSHOT_AGE_MILLIS;
+    }
+
+    private void logSkippedQuickSnapshot(String capturePhase, String packageName,
+                                         long requestStartedNanos,
+                                         long captureCompletedNanos,
+                                         AccessibilityLayoutSnapshot snapshot) {
+        addCaptureLog("snapshotSkipped", packageName, true,
+                elapsedMillis(requestStartedNanos, captureCompletedNanos),
+                "capture=" + capturePhase
+                        + " reason=stale"
+                        + " nodes=" + snapshot.getNodes().size()
+                        + " interactive=" + snapshot.getInteractiveNodeCount());
+    }
+
     private void requestQuickLayoutCapture() {
         if (closed.get()
                 || viewClickPosition != null
@@ -1243,45 +1567,39 @@ public class MainFunction {
         String packageAtRequest = currentPackage;
         String activityAtRequest = currentActivity;
         long requestStartedNanos = System.nanoTime();
-        AtomicBoolean panelShown = new AtomicBoolean(false);
         AtomicReference<AccessibilityLayoutSnapshot> bestSnapshot = new AtomicReference<>();
+        clearFrozenScreenCapture();
         addCaptureLog("request", packageAtRequest, true, 0L,
                 "activity=" + valueOrUnknown(activityAtRequest));
-        Runnable fallback = () -> {
+        requestFrozenScreenCapture(captureGeneration, packageAtRequest,
+                activityAtRequest, requestStartedNanos);
+        showQuickCapturePanel(null, packageAtRequest, "immediate", requestStartedNanos);
+        quickCaptureInProgress.set(false);
+        captureLayoutAsync(packageAtRequest, activityAtRequest, true,
+                false, "initial", (snapshot, captureCompletedNanos) -> {
             if (closed.get() || captureGeneration != layoutCaptureGeneration.get()) {
                 return;
             }
-            if (panelShown.compareAndSet(false, true)) {
-                quickCaptureInProgress.set(false);
-                showQuickCapturePanel(null, packageAtRequest, "timeout", requestStartedNanos);
-            }
-        };
-        mainHandler.postDelayed(fallback, QUICK_CAPTURE_PANEL_TIMEOUT_MILLIS);
-        captureLayoutAsync(packageAtRequest, activityAtRequest, true, snapshot -> {
-            quickCaptureInProgress.set(false);
-            if (closed.get() || captureGeneration != layoutCaptureGeneration.get()) {
-                mainHandler.removeCallbacks(fallback);
-                return;
-            }
-            if (panelShown.compareAndSet(false, true)) {
-                mainHandler.removeCallbacks(fallback);
-                if (snapshot == null || !snapshot.hasSelectableContent()) {
-                    showQuickCapturePanel(null, packageAtRequest, "empty", requestStartedNanos);
-                } else {
+            boolean snapshotTimely = isQuickSnapshotTimely(
+                    requestStartedNanos, captureCompletedNanos);
+            if (snapshot != null && snapshot.hasSelectableContent() && snapshotTimely) {
+                AccessibilityLayoutSnapshot previousSnapshot = bestSnapshot.get();
+                if (previousSnapshot == null
+                        || capturedNodeQuality(snapshot)
+                        >= capturedNodeQuality(previousSnapshot)) {
                     bestSnapshot.set(snapshot);
-                    showQuickCapturePanel(snapshot, packageAtRequest, "snapshot", requestStartedNanos);
+                    renderQuickCapturedLayout(snapshot, captureGeneration, false,
+                            "lateRender", requestStartedNanos);
                 }
-                scheduleQuickLayoutRefresh(packageAtRequest, activityAtRequest,
-                        captureGeneration, requestStartedNanos, bestSnapshot, 1);
-                return;
+            } else if (snapshot != null && snapshot.hasSelectableContent()) {
+                logSkippedQuickSnapshot("initial", packageAtRequest,
+                        requestStartedNanos, captureCompletedNanos, snapshot);
             }
-            if (snapshot != null && snapshot.hasSelectableContent()) {
-                bestSnapshot.set(snapshot);
-                renderQuickCapturedLayout(snapshot, captureGeneration, false, "lateRender");
-            }
-            scheduleQuickLayoutRefresh(packageAtRequest, activityAtRequest,
-                    captureGeneration, requestStartedNanos, bestSnapshot, 1);
         });
+        for (int attempt = 1; attempt <= QUICK_CAPTURE_MAX_REFRESH_ATTEMPTS; attempt++) {
+            scheduleQuickLayoutRefresh(packageAtRequest, activityAtRequest,
+                    captureGeneration, requestStartedNanos, bestSnapshot, attempt);
+        }
     }
 
     private void scheduleQuickLayoutRefresh(String packageAtRequest,
@@ -1292,46 +1610,61 @@ public class MainFunction {
                                              int attempt) {
         if (attempt > QUICK_CAPTURE_MAX_REFRESH_ATTEMPTS
                 || closed.get()
-                || captureGeneration != layoutCaptureGeneration.get()
-                || activeWidgetSelection == null
-                || activeWidgetSelection.widgetRect != null
-                || !shouldRefreshQuickSnapshot(bestSnapshot.get(), attempt)) {
+                || captureGeneration != layoutCaptureGeneration.get()) {
             return;
         }
         long delayMillis = attempt == 1
                 ? QUICK_CAPTURE_REFRESH_FIRST_DELAY_MILLIS
                 : QUICK_CAPTURE_REFRESH_SECOND_DELAY_MILLIS;
-        mainHandler.postDelayed(() -> {
-            if (closed.get()
-                    || captureGeneration != layoutCaptureGeneration.get()
-                    || viewClickPosition == null
-                    || addDataBinding == null
-                    || widgetSelectBinding == null
-                    || activeWidgetSelection == null
-                    || activeWidgetSelection.widgetRect != null
-                    || captureLayoutHiddenByUser) {
-                return;
-            }
-            addCaptureLog("refreshRequest", packageAtRequest, true,
-                    elapsedMillis(requestStartedNanos), "attempt=" + attempt);
-            captureLayoutAsync(packageAtRequest, activityAtRequest, true, refreshedSnapshot -> {
-                if (closed.get() || captureGeneration != layoutCaptureGeneration.get()) {
+        try {
+            executorServiceCapture.schedule(() -> {
+                if (closed.get()
+                        || captureGeneration != layoutCaptureGeneration.get()
+                        || frozenCoordinateSelected
+                        || !shouldRefreshQuickSnapshot(bestSnapshot.get(), attempt)) {
                     return;
                 }
-                AccessibilityLayoutSnapshot previousSnapshot = bestSnapshot.get();
-                if (refreshedSnapshot != null
-                        && refreshedSnapshot.hasSelectableContent()
-                        && (previousSnapshot == null
-                        || capturedNodeQuality(refreshedSnapshot)
-                        >= capturedNodeQuality(previousSnapshot))) {
-                    bestSnapshot.set(refreshedSnapshot);
-                    renderQuickCapturedLayout(refreshedSnapshot, captureGeneration,
-                            true, "refreshRender");
-                }
-                scheduleQuickLayoutRefresh(packageAtRequest, activityAtRequest,
-                        captureGeneration, requestStartedNanos, bestSnapshot, attempt + 1);
-            });
-        }, delayMillis);
+                addCaptureLog("refreshRequest", packageAtRequest, true,
+                        elapsedMillis(requestStartedNanos), "attempt=" + attempt);
+                captureLayoutAsync(packageAtRequest, activityAtRequest, true,
+                        true, "refresh" + attempt,
+                        (refreshedSnapshot, captureCompletedNanos) -> {
+                    if (closed.get() || captureGeneration != layoutCaptureGeneration.get()) {
+                        return;
+                    }
+                    AccessibilityLayoutSnapshot previousSnapshot = bestSnapshot.get();
+                    if (refreshedSnapshot != null
+                            && refreshedSnapshot.hasSelectableContent()
+                            && isQuickSnapshotTimely(
+                            requestStartedNanos, captureCompletedNanos)
+                            && (previousSnapshot == null
+                            || capturedNodeQuality(refreshedSnapshot)
+                            >= capturedNodeQuality(previousSnapshot))) {
+                        bestSnapshot.set(refreshedSnapshot);
+                        if (viewClickPosition != null
+                                && addDataBinding != null
+                                && widgetSelectBinding != null
+                                && activeWidgetSelection != null
+                                && activeWidgetSelection.widgetRect == null
+                                && !frozenCoordinateSelected
+                                && !captureLayoutHiddenByUser) {
+                            renderQuickCapturedLayout(refreshedSnapshot, captureGeneration,
+                                    true, "refreshRender", requestStartedNanos);
+                        }
+                    } else if (refreshedSnapshot != null
+                            && refreshedSnapshot.hasSelectableContent()
+                            && !isQuickSnapshotTimely(
+                            requestStartedNanos, captureCompletedNanos)) {
+                        logSkippedQuickSnapshot("refresh" + attempt, packageAtRequest,
+                                requestStartedNanos, captureCompletedNanos,
+                                refreshedSnapshot);
+                    }
+                });
+            }, delayMillis, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException ignored) {
+            addCaptureLog("refreshRejected", packageAtRequest, true,
+                    elapsedMillis(requestStartedNanos), "attempt=" + attempt);
+        }
     }
 
     private static boolean shouldRefreshQuickSnapshot(
@@ -1356,7 +1689,8 @@ public class MainFunction {
         String activityAtRequest = currentActivity;
         addCaptureLog("request", packageAtRequest, false, 0L,
                 "activity=" + valueOrUnknown(activityAtRequest));
-        captureLayoutAsync(packageAtRequest, activityAtRequest, false, snapshot -> {
+        captureLayoutAsync(packageAtRequest, activityAtRequest, false,
+                (snapshot, captureCompletedNanos) -> {
             if (closed.get()
                     || captureGeneration != layoutCaptureGeneration.get()
                     || requestedAddBinding != addDataBinding
@@ -1375,13 +1709,22 @@ public class MainFunction {
 
     private void captureLayoutAsync(String packageAtRequest, String activityAtRequest,
                                     boolean quick, LayoutCaptureCallback callback) {
+        captureLayoutAsync(packageAtRequest, activityAtRequest, quick,
+                true, quick ? "quick" : "manual", callback);
+    }
+
+    private void captureLayoutAsync(String packageAtRequest, String activityAtRequest,
+                                    boolean quick, boolean enrichSparse,
+                                    String capturePhase, LayoutCaptureCallback callback) {
         try {
             executorServiceCapture.execute(() -> {
                 AccessibilityLayoutSnapshot capturedSnapshot = null;
                 CaptureTrace trace = new CaptureTrace();
+                trace.capturePhase = capturePhase;
+                trace.enrichmentEnabled = enrichSparse;
                 try {
                     capturedSnapshot = captureCurrentLayout(
-                            packageAtRequest, activityAtRequest, quick, trace);
+                            packageAtRequest, activityAtRequest, quick, enrichSparse, trace);
                 } catch (RuntimeException exception) {
                     // A window can disappear between the double tap and the
                     // accessibility IPC. Report a failed capture on the UI thread.
@@ -1393,20 +1736,22 @@ public class MainFunction {
                 trace.selectable = capturedSnapshot != null
                         && capturedSnapshot.hasSelectableContent();
                 trace.recordSnapshot(capturedSnapshot);
+                AccessibilityLayoutSnapshot snapshot = capturedSnapshot;
+                long captureCompletedNanos = System.nanoTime();
                 addCaptureLog("complete", packageAtRequest, quick,
                         trace.elapsedMillis, trace.toDetails());
-                AccessibilityLayoutSnapshot snapshot = capturedSnapshot;
-                mainHandler.post(() -> callback.onCaptured(snapshot));
+                mainHandler.post(() -> callback.onCaptured(snapshot, captureCompletedNanos));
             });
         } catch (RejectedExecutionException ignored) {
             addCaptureLog("rejected", packageAtRequest, quick, 0L, "executor=shutdown");
-            mainHandler.post(() -> callback.onCaptured(null));
+            mainHandler.post(() -> callback.onCaptured(null, System.nanoTime()));
         }
     }
 
     private AccessibilityLayoutSnapshot captureCurrentLayout(String packageAtRequest,
                                                                String activityAtRequest,
                                                                boolean quick,
+                                                               boolean enrichSparse,
                                                                CaptureTrace trace) {
         if (closed.get()) {
             trace.failure = "closed";
@@ -1446,7 +1791,9 @@ public class MainFunction {
             capturedNodes = normalizeCapturedNodes(capturedNodes);
             trace.activeTraversalMillis = elapsedMillis(activeTraversalStartedNanos);
 
-            if (requiresCaptureEnrichment(capturedNodes) && trace.moduleEnabled) {
+            if (enrichSparse
+                    && requiresCaptureEnrichment(capturedNodes)
+                    && trace.moduleEnabled) {
                 List<AccessibilityLayoutSnapshot.Node> moduleNodes = new ArrayList<>();
                 long moduleTraversalStartedNanos = System.nanoTime();
                 appendCapturedNodes(activeRoot, moduleNodes,
@@ -1461,7 +1808,7 @@ public class MainFunction {
                 }
             }
 
-            if (requiresCaptureEnrichment(capturedNodes)) {
+            if (enrichSparse && requiresCaptureEnrichment(capturedNodes)) {
                 List<AccessibilityLayoutSnapshot.Node> windowNodes = captureMatchingWindows(
                         capturedPackage,
                         QUICK_CAPTURE_WINDOW_FALLBACK_MILLIS,
@@ -1670,16 +2017,22 @@ public class MainFunction {
     private void renderQuickCapturedLayout(AccessibilityLayoutSnapshot snapshot,
                                            long captureGeneration,
                                            boolean allowVisibleRefresh,
-                                           String phase) {
+                                           String phase,
+                                           long requestStartedNanos) {
         if (!snapshot.hasSelectableContent()
                 || closed.get()
                 || captureGeneration != layoutCaptureGeneration.get()
                 || addDataBinding == null
                 || widgetSelectBinding == null
-                || activeWidgetSelection == null) {
+                || activeWidgetSelection == null
+                || captureLayoutHiddenByUser
+                || frozenCoordinateSelected) {
             return;
         }
-        if (bParams == null || (!allowVisibleRefresh && bParams.alpha != 0f)
+        if (bParams == null
+                || (!allowVisibleRefresh
+                && bParams.alpha != 0f
+                && activeFrozenCapture == null)
                 || activeWidgetSelection.widgetRect != null) {
             return;
         }
@@ -1688,8 +2041,11 @@ public class MainFunction {
                 "nodes=" + snapshot.getNodes().size()
                         + " rendered=" + result.renderedNodeCount
                         + " interactive=" + result.interactiveNodeCount
+                        + " widgetTargets=" + result.widgetTargetCount
                         + " clipped=" + result.clippedNodeCount
                         + " outside=" + result.outsideNodeCount
+                        + " frozen=" + result.frozenBackground
+                        + " requestAgeMs=" + elapsedMillis(requestStartedNanos)
                         + " overlay=" + bParams.width + "x" + bParams.height);
     }
 
@@ -1713,6 +2069,7 @@ public class MainFunction {
                 "source=" + source + " nodes=" + nodeCount
                         + " rendered=" + renderedNodeCount
                         + " interactive=" + interactiveNodeCount
+                        + " frozen=" + (activeFrozenCapture != null)
                         + " created=" + created);
     }
 
@@ -1729,7 +2086,16 @@ public class MainFunction {
         currentAddBinding.pkgName.setText(widgetSelect.appPackage);
         currentAddBinding.actName.setText(widgetSelect.appActivity);
         currentAddBinding.saveWid.setEnabled(false);
+        if (frozenCaptureView != null) {
+            frozenCaptureView.setImageDrawable(null);
+        }
         currentWidgetBinding.frame.removeAllViews();
+        frozenCaptureView = null;
+        frozenCoordinateMarker = null;
+
+        int overlayWidth = bParams.width;
+        int overlayHeight = bParams.height;
+        boolean frozenBackground = showFrozenCaptureLayout();
 
         View.OnClickListener onClickListener = view -> {
             AccessibilityLayoutSnapshot.Node node =
@@ -1758,10 +2124,9 @@ public class MainFunction {
 
         int renderedNodeCount = 0;
         int interactiveNodeCount = 0;
+        int widgetTargetCount = 0;
         int clippedNodeCount = 0;
         int outsideNodeCount = 0;
-        int overlayWidth = bParams.width;
-        int overlayHeight = bParams.height;
         for (AccessibilityLayoutSnapshot.Node node : snapshot.getNodes()) {
             if (node.getWidth() <= 0 || node.getHeight() <= 0) {
                 continue;
@@ -1786,10 +2151,17 @@ public class MainFunction {
             params.topMargin = visibleBounds.top;
             View view = new View(service);
             view.setBackgroundResource(R.drawable.node);
-            view.setFocusableInTouchMode(true);
-            view.setFocusable(true);
-            view.setOnClickListener(onClickListener);
-            view.setOnFocusChangeListener(onFocusChangeListener);
+            boolean widgetTarget = node.isUsefulWidgetTarget(overlayWidth, overlayHeight);
+            if (widgetTarget) {
+                view.setFocusableInTouchMode(true);
+                view.setFocusable(true);
+                view.setOnClickListener(onClickListener);
+                view.setOnFocusChangeListener(onFocusChangeListener);
+                widgetTargetCount++;
+            } else {
+                view.setClickable(false);
+                view.setFocusable(false);
+            }
             view.setTag(R.string.nodeInfo, node);
             currentWidgetBinding.frame.addView(view, params);
             renderedNodeCount++;
@@ -1799,13 +2171,19 @@ public class MainFunction {
         }
         currentAddBinding.switchWid.setEnabled(true);
         if (renderedNodeCount == 0) {
-            currentAddBinding.switchWid.setText("显示布局");
-            Toast.makeText(service, "当前页面没有可选择的控件", Toast.LENGTH_SHORT).show();
-            return new RenderResult(0, interactiveNodeCount, clippedNodeCount,
-                    outsideNodeCount);
+            if (frozenBackground) {
+                currentAddBinding.switchWid.setText("隐藏布局");
+                currentAddBinding.widget.setText(
+                        "当前页面没有可选控件，请点击冻结画面选择坐标");
+            } else {
+                currentAddBinding.switchWid.setText("显示布局");
+                Toast.makeText(service, "当前页面没有可选择的控件", Toast.LENGTH_SHORT).show();
+            }
+            return new RenderResult(0, interactiveNodeCount, widgetTargetCount,
+                    clippedNodeCount, outsideNodeCount, frozenBackground);
         }
 
-        bParams.alpha = 0.5f;
+        bParams.alpha = frozenBackground ? 1f : 0.5f;
         bParams.flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                 | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
                 | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
@@ -1813,7 +2191,8 @@ public class MainFunction {
         currentAddBinding.switchWid.setText("隐藏布局");
         captureLayoutHiddenByUser = false;
         return new RenderResult(renderedNodeCount, interactiveNodeCount,
-                clippedNodeCount, outsideNodeCount);
+                widgetTargetCount, clippedNodeCount, outsideNodeCount,
+                frozenBackground);
     }
 
     private void applyCapturedNodeSelection(AccessibilityLayoutSnapshot.Node node,
@@ -1836,6 +2215,14 @@ public class MainFunction {
         widgetSelect.widgetViewId = node.getViewId();
         widgetSelect.widgetDescribe = node.getDescription();
         widgetSelect.widgetText = node.getText();
+        frozenCoordinateSelected = false;
+        currentAddBinding.saveAim.setEnabled(false);
+        currentAddBinding.xy.setText("");
+        if (frozenCoordinateMarker != null
+                && frozenCoordinateMarker.getParent() == currentWidgetBinding.frame) {
+            currentWidgetBinding.frame.removeView(frozenCoordinateMarker);
+            frozenCoordinateMarker = null;
+        }
         currentAddBinding.pkgName.setText(widgetSelect.appPackage);
         currentAddBinding.actName.setText(widgetSelect.appActivity);
         currentAddBinding.saveWid.setEnabled(
@@ -1860,19 +2247,24 @@ public class MainFunction {
     private static final class RenderResult {
         private final int renderedNodeCount;
         private final int interactiveNodeCount;
+        private final int widgetTargetCount;
         private final int clippedNodeCount;
         private final int outsideNodeCount;
+        private final boolean frozenBackground;
 
         private RenderResult(int renderedNodeCount, int interactiveNodeCount,
-                             int clippedNodeCount, int outsideNodeCount) {
+                             int widgetTargetCount, int clippedNodeCount,
+                             int outsideNodeCount, boolean frozenBackground) {
             this.renderedNodeCount = renderedNodeCount;
             this.interactiveNodeCount = interactiveNodeCount;
+            this.widgetTargetCount = widgetTargetCount;
             this.clippedNodeCount = clippedNodeCount;
             this.outsideNodeCount = outsideNodeCount;
+            this.frozenBackground = frozenBackground;
         }
 
         private static RenderResult empty() {
-            return new RenderResult(0, 0, 0, 0);
+            return new RenderResult(0, 0, 0, 0, 0, false);
         }
     }
 
@@ -1887,7 +2279,10 @@ public class MainFunction {
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
         windowManager.updateViewLayout(widgetSelectBinding.getRoot(), bParams);
         addDataBinding.saveWid.setEnabled(false);
-        widgetSelectBinding.frame.removeAllViews();
+        // Preserve the frozen frame, captured node outlines and coordinate marker
+        // while hidden. A transient ad may already be gone when the user shows
+        // the layout again, so rebuilding from the live page would lose the
+        // exact state that the rule picker was opened for.
         addDataBinding.switchWid.setEnabled(true);
         addDataBinding.switchWid.setText("显示布局");
         captureLayoutHiddenByUser = true;
@@ -1895,6 +2290,11 @@ public class MainFunction {
 
     private static long elapsedMillis(long startedNanos) {
         return TimeUnit.NANOSECONDS.toMillis(Math.max(0L, System.nanoTime() - startedNanos));
+    }
+
+    private static long elapsedMillis(long startedNanos, long completedNanos) {
+        return TimeUnit.NANOSECONDS.toMillis(
+                Math.max(0L, completedNanos - startedNanos));
     }
 
     private void addCaptureLog(String phase, String packageName, boolean quick,
@@ -1922,6 +2322,8 @@ public class MainFunction {
 
     private static final class CaptureTrace {
         private final long startedNanos = System.nanoTime();
+        private String capturePhase = "unknown";
+        private boolean enrichmentEnabled;
         private boolean moduleEnabled;
         private int windowCount;
         private int matchedWindowCount;
@@ -1965,7 +2367,9 @@ public class MainFunction {
         }
 
         private String toDetails() {
-            StringBuilder details = new StringBuilder("source=").append(source)
+            StringBuilder details = new StringBuilder("capture=").append(capturePhase)
+                    .append(" enrich=").append(enrichmentEnabled)
+                    .append(" source=").append(source)
                     .append(" module=").append(moduleEnabled)
                     .append(" rootMs=").append(rootLookupMillis)
                     .append(" activeMs=").append(activeTraversalMillis)
@@ -2002,8 +2406,35 @@ public class MainFunction {
         }
     }
 
+    private static final class FrozenScreenCapture {
+        private final Bitmap bitmap;
+        private final String appPackage;
+        private final String appActivity;
+        private final long generation;
+        private final long requestStartedNanos;
+        private final long capturedAfterMillis;
+
+        private FrozenScreenCapture(Bitmap bitmap, String appPackage,
+                                    String appActivity, long generation,
+                                    long requestStartedNanos,
+                                    long capturedAfterMillis) {
+            this.bitmap = bitmap;
+            this.appPackage = appPackage == null ? "" : appPackage;
+            this.appActivity = appActivity == null ? "" : appActivity;
+            this.generation = generation;
+            this.requestStartedNanos = requestStartedNanos;
+            this.capturedAfterMillis = capturedAfterMillis;
+        }
+
+        private void recycle() {
+            if (!bitmap.isRecycled()) {
+                bitmap.recycle();
+            }
+        }
+    }
+
     private interface LayoutCaptureCallback {
-        void onCaptured(AccessibilityLayoutSnapshot snapshot);
+        void onCaptured(AccessibilityLayoutSnapshot snapshot, long captureCompletedNanos);
     }
 
     private void showWarningDialog(Runnable onSureRun, String message) {
@@ -2405,10 +2836,13 @@ public class MainFunction {
         removeViewSafely(viewClickPosition);
         removeViewSafely(ignoreView);
         removeViewSafely(dbClickView);
+        clearFrozenScreenCapture();
         widgetSelectBinding = null;
         addDataBinding = null;
         viewClickPosition = null;
         activeWidgetSelection = null;
+        activeCoordinateSelection = null;
+        frozenCoordinateSelected = false;
         ignoreView = null;
         dbClickView = null;
         alreadyClickSet.clear();

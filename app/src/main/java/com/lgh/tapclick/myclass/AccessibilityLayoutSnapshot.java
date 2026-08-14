@@ -246,6 +246,24 @@ public final class AccessibilityLayoutSnapshot {
                     || !text.isEmpty();
         }
 
+        /**
+         * Returns whether this node is useful as an individual widget target.
+         * Full-screen, non-interactive layout containers are still rendered for
+         * diagnostics, but should not consume taps intended for the frozen-screen
+         * coordinate fallback underneath them.
+         */
+        public boolean isUsefulWidgetTarget(int viewportWidth, int viewportHeight) {
+            if (isInteractive()) {
+                return true;
+            }
+            if (viewportWidth <= 0 || viewportHeight <= 0) {
+                return hasSelectableMetadata();
+            }
+            long viewportArea = (long) viewportWidth * viewportHeight;
+            boolean coversMostOfViewport = getArea() * 100L >= viewportArea * 85L;
+            return !coversMostOfViewport;
+        }
+
         public int getLeft() {
             return left;
         }

@@ -236,6 +236,32 @@ public class RuleIntegrityTest {
     }
 
     @Test
+    public void fullScreenStructuralContainersDoNotBlockFrozenCoordinateSelection() {
+        AccessibilityLayoutSnapshot.Node structuralRoot =
+                new AccessibilityLayoutSnapshot.Node(
+                        false, 7L, "android:id/content", "", "",
+                        0, 0, 1080, 2400,
+                        true, true, false, 0x4c, 2, 3,
+                        "android.widget.FrameLayout", "example.app");
+        AccessibilityLayoutSnapshot.Node fullScreenInteractive =
+                new AccessibilityLayoutSnapshot.Node(
+                        true, 8L, "interactive", "", "",
+                        0, 0, 1080, 2400,
+                        true, true, false, 0x10, 0, 3,
+                        "android.view.View", "example.app");
+        AccessibilityLayoutSnapshot.Node smallCustomTarget =
+                new AccessibilityLayoutSnapshot.Node(
+                        false, 9L, "", "", "",
+                        940, 20, 1060, 140,
+                        true, true, false, 0, 0, 3,
+                        "android.view.View", "example.app");
+
+        assertFalse(structuralRoot.isUsefulWidgetTarget(1080, 2400));
+        assertTrue(fullScreenInteractive.isUsefulWidgetTarget(1080, 2400));
+        assertTrue(smallCustomTarget.isUsefulWidgetTarget(1080, 2400));
+    }
+
+    @Test
     public void duplicateNodeKeepsTheRicherAccessibilityMetadata() {
         AccessibilityLayoutSnapshot snapshot = new AccessibilityLayoutSnapshot(
                 "example.app", "example.Activity", Arrays.asList(
