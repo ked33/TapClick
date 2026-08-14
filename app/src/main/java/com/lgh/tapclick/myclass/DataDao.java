@@ -24,14 +24,33 @@ public abstract class DataDao {
     @Query("SELECT * FROM AppDescribe")
     public abstract List<AppDescribe> getAllAppDescribes();
 
+    @Query("SELECT * FROM AppDescribe WHERE coordinateOnOff = 1 OR widgetOnOff = 1")
+    public abstract List<AppDescribe> getEnabledAppDescribes();
+
     @Query("SELECT * FROM AppDescribe WHERE appPackage = :appPackage")
     public abstract AppDescribe getAppDescribeByPackage(String appPackage);
 
     @Query("SELECT * FROM Coordinate WHERE appPackage = :appPackage")
     public abstract List<Coordinate> getCoordinatesByPackage(String appPackage);
 
+    @Query("SELECT * FROM Coordinate")
+    public abstract List<Coordinate> getAllCoordinates();
+
+    @Query("SELECT Coordinate.* FROM Coordinate " +
+            "INNER JOIN AppDescribe ON Coordinate.appPackage = AppDescribe.appPackage " +
+            "WHERE AppDescribe.coordinateOnOff = 1")
+    public abstract List<Coordinate> getEnabledCoordinates();
+
     @Query("SELECT * FROM Widget WHERE appPackage = :appPackage")
     public abstract List<Widget> getWidgetsByPackage(String appPackage);
+
+    @Query("SELECT * FROM Widget")
+    public abstract List<Widget> getAllWidgets();
+
+    @Query("SELECT Widget.* FROM Widget " +
+            "INNER JOIN AppDescribe ON Widget.appPackage = AppDescribe.appPackage " +
+            "WHERE AppDescribe.widgetOnOff = 1")
+    public abstract List<Widget> getEnabledWidgets();
 
     @Query("SELECT * FROM MyAppConfig WHERE id = 0")
     public abstract MyAppConfig getMyAppConfig();
@@ -76,10 +95,19 @@ public abstract class DataDao {
     public abstract void updateAppDescribe(AppDescribe appDescribe);
 
     @Update
+    public abstract void updateAppDescribes(List<AppDescribe> appDescribes);
+
+    @Update
     public abstract void updateCoordinate(Coordinate coordinate);
 
     @Update
+    public abstract void updateCoordinates(List<Coordinate> coordinates);
+
+    @Update
     public abstract void updateWidget(Widget widget);
+
+    @Update
+    public abstract void updateWidgets(List<Widget> widgets);
 
     @Update
     public abstract void updateMyAppConfig(MyAppConfig myAppConfig);

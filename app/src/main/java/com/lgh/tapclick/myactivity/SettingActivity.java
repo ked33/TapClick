@@ -20,6 +20,16 @@ public class SettingActivity extends BaseActivity {
         ActivitySettingBinding settingBinding = ActivitySettingBinding.inflate(getLayoutInflater());
         setContentView(settingBinding.getRoot());
 
+        settingBinding.settingRuntimeLog.setChecked(MyUtils.getRuntimeLoggingEnabled());
+        settingBinding.settingRuntimeLog.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                boolean enabled = settingBinding.settingRuntimeLog.isChecked();
+                MyUtils.setRuntimeLoggingEnabled(enabled);
+                MyUtils.requestUpdateRuntimeLogging(enabled);
+            }
+        });
+
         settingBinding.settingAutoHideOnTaskList.setEnabled(false);
         MyApplication.queryDatabase(() -> MyApplication.dataDao.getMyAppConfig(), result -> {
             if (isFinishing() || isDestroyed()) {

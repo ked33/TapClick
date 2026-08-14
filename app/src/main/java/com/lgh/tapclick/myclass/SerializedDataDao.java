@@ -21,6 +21,11 @@ final class SerializedDataDao extends DataDao {
     }
 
     @Override
+    public List<AppDescribe> getEnabledAppDescribes() {
+        return MyApplication.callDatabase(delegate::getEnabledAppDescribes);
+    }
+
+    @Override
     public AppDescribe getAppDescribeByPackage(String appPackage) {
         return MyApplication.callDatabase(() -> delegate.getAppDescribeByPackage(appPackage));
     }
@@ -31,8 +36,28 @@ final class SerializedDataDao extends DataDao {
     }
 
     @Override
+    public List<Coordinate> getAllCoordinates() {
+        return MyApplication.callDatabase(delegate::getAllCoordinates);
+    }
+
+    @Override
+    public List<Coordinate> getEnabledCoordinates() {
+        return MyApplication.callDatabase(delegate::getEnabledCoordinates);
+    }
+
+    @Override
     public List<Widget> getWidgetsByPackage(String appPackage) {
         return MyApplication.callDatabase(() -> delegate.getWidgetsByPackage(appPackage));
+    }
+
+    @Override
+    public List<Widget> getAllWidgets() {
+        return MyApplication.callDatabase(delegate::getAllWidgets);
+    }
+
+    @Override
+    public List<Widget> getEnabledWidgets() {
+        return MyApplication.callDatabase(delegate::getEnabledWidgets);
     }
 
     @Override
@@ -133,6 +158,14 @@ final class SerializedDataDao extends DataDao {
     }
 
     @Override
+    public void updateAppDescribes(List<AppDescribe> appDescribes) {
+        MyApplication.callDatabase(() -> {
+            delegate.updateAppDescribes(appDescribes);
+            return null;
+        });
+    }
+
+    @Override
     public void updateCoordinate(Coordinate coordinate) {
         MyApplication.callDatabase(() -> {
             delegate.updateCoordinate(coordinate);
@@ -141,9 +174,25 @@ final class SerializedDataDao extends DataDao {
     }
 
     @Override
+    public void updateCoordinates(List<Coordinate> coordinates) {
+        MyApplication.callDatabase(() -> {
+            delegate.updateCoordinates(coordinates);
+            return null;
+        });
+    }
+
+    @Override
     public void updateWidget(Widget widget) {
         MyApplication.callDatabase(() -> {
             delegate.updateWidget(widget);
+            return null;
+        });
+    }
+
+    @Override
+    public void updateWidgets(List<Widget> widgets) {
+        MyApplication.callDatabase(() -> {
+            delegate.updateWidgets(widgets);
             return null;
         });
     }

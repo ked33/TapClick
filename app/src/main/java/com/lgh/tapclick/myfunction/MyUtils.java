@@ -99,6 +99,20 @@ public class MyUtils {
         return false;
     }
 
+    public static boolean requestUpdateRuntimeLogging(boolean enable) {
+        try {
+            ContentValues contentValues = new ContentValues();
+            contentValues.put("updateScope", "runtimeLogging");
+            contentValues.put("value", enable);
+            int result = mContext.getContentResolver().update(
+                    Uri.parse(contentProviderAuthority), contentValues, null, null);
+            return result > 0;
+        } catch (NullPointerException e) {
+            e.printStackTrace();
+        }
+        return false;
+    }
+
     public static boolean getKeepAliveByNotification() {
         SharedPreferences preferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE);
         return preferences.getBoolean("keepAliveByNotification", false);
@@ -119,6 +133,16 @@ public class MyUtils {
         SharedPreferences preferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE);
         preferences.edit().putBoolean("keepAliveByFloatingWindow", enable).apply();
         return true;
+    }
+
+    public static boolean getRuntimeLoggingEnabled() {
+        SharedPreferences preferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE);
+        return preferences.getBoolean("runtimeLoggingEnabled", false);
+    }
+
+    public static void setRuntimeLoggingEnabled(boolean enable) {
+        SharedPreferences preferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE);
+        preferences.edit().putBoolean("runtimeLoggingEnabled", enable).apply();
     }
 
     public static boolean requestUpdateAllDate() {

@@ -18,11 +18,10 @@ import android.text.Editable;
 import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.util.DisplayMetrics;
+import android.util.LruCache;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.inputmethod.InputMethodInfo;
-import android.view.inputmethod.InputMethodManager;
 import android.widget.ArrayAdapter;
 import android.widget.Toast;
 
@@ -32,7 +31,6 @@ import androidx.activity.result.ActivityResultCallback;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.core.content.FileProvider;
-import androidx.core.content.res.ResourcesCompat;
 import androidx.recyclerview.widget.RecyclerView;
 
 import com.google.gson.Gson;
@@ -44,11 +42,14 @@ import com.lgh.tapclick.databinding.ViewEditFileNameBinding;
 import com.lgh.tapclick.databinding.ViewItemAppBinding;
 import com.lgh.tapclick.databinding.ViewOnOffWarningBinding;
 import com.lgh.tapclick.mybean.AppDescribe;
+import com.lgh.tapclick.mybean.Coordinate;
 import com.lgh.tapclick.mybean.Regulation;
 import com.lgh.tapclick.mybean.RegulationExport;
+import com.lgh.tapclick.mybean.Widget;
 import com.lgh.tapclick.myclass.DataDao;
 import com.lgh.tapclick.myclass.ExportFileManager;
 import com.lgh.tapclick.myclass.MyApplication;
+import com.lgh.tapclick.myclass.PackageCatalog;
 import com.lgh.tapclick.myfunction.MyUtils;
 
 import java.io.File;
@@ -59,25 +60,30 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.crypto.digest.DigestUtil;
 
 public class ListDataActivity extends BaseActivity {
+    private static final long SEARCH_DEBOUNCE_MILLIS = 150;
 
     private final MyAdapter myAdapter = new MyAdapter();
     private final List<AppDescribe> appDescribeList = new ArrayList<>();
     private final List<AppDescribeItem> appDescribeItemList = new ArrayList<>();
     private final List<AppDescribeItem> appDescribeItemFilterList = new ArrayList<>();
     private final Set<AppDescribeItem> appDescribeItemSelectedSet = new HashSet<>();
-    private final Set<String> pkgSuggestNotOnList = new HashSet<>();
+    private final Set<String> pkgSuggestNotOnList = ConcurrentHashMap.newKeySet();
+    private final Set<String> iconLoadsInFlight = ConcurrentHashMap.newKeySet();
+    private final LruCache<String, Drawable.ConstantState> iconCache = new LruCache<>(16);
     private ActivityResultLauncher<Intent> itemResultLauncher;
     private ActivityListDataBinding listDataBinding;
     private Context context;
     private DataDao dataDao;
     private PackageManager packageManager;
     private AppDescribeItem curAppDescribeItem;
+    private Runnable pendingSearch;
 
     @SuppressLint("ClickableViewAccessibility")
     @Override
@@ -139,24 +145,6 @@ public class ListDataActivity extends BaseActivity {
             Toast.makeText(context, "无障碍服务未开启", Toast.LENGTH_SHORT).show();
         }
 
-        Set<String> pkgSysSet = packageManager.
-                getInstalledPackages(PackageManager.MATCH_SYSTEM_ONLY)
-                .stream().map(e -> e.packageName)
-                .collect(Collectors.toSet());
-        Set<String> pkgInputMethodSet = getSystemService(InputMethodManager.class)
-                .getInputMethodList()
-                .stream()
-                .map(InputMethodInfo::getPackageName)
-                .collect(Collectors.toSet());
-        Set<String> pkgHasHomeSet = packageManager
-                .queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), PackageManager.MATCH_ALL)
-                .stream()
-                .map(e -> e.activityInfo.packageName)
-                .collect(Collectors.toSet());
-        pkgSuggestNotOnList.addAll(pkgSysSet);
-        pkgSuggestNotOnList.addAll(pkgInputMethodSet);
-        pkgSuggestNotOnList.addAll(pkgHasHomeSet);
-
         listDataBinding.recyclerView.setAdapter(myAdapter);
 
         List<String> searchKeyword = new ArrayList<>();
@@ -184,98 +172,16 @@ public class ListDataActivity extends BaseActivity {
             @Override
             public void afterTextChanged(Editable s) {
                 String constraint = s.toString().trim();
-                List<AppDescribeItem> listTemp = new ArrayList<>();
-                switch (constraint) {
-                    case "@开启":
-                        for (AppDescribeItem e : appDescribeItemList) {
-                            if (e.appDescribe.coordinateOnOff || e.appDescribe.widgetOnOff) {
-                                listTemp.add(e);
-                            }
-                        }
-                        break;
-                    case "@关闭":
-                        for (AppDescribeItem e : appDescribeItemList) {
-                            if (!e.appDescribe.coordinateOnOff && !e.appDescribe.widgetOnOff) {
-                                listTemp.add(e);
-                            }
-                        }
-                        break;
-                    case "@普通应用":
-                        for (AppDescribeItem e : appDescribeItemList) {
-                            if (!e.isSysApp) {
-                                listTemp.add(e);
-                            }
-                        }
-                        break;
-                    case "@系统应用":
-                        for (AppDescribeItem e : appDescribeItemList) {
-                            if (e.isSysApp) {
-                                listTemp.add(e);
-                            }
-                        }
-                        break;
-                    case "@已创建规则":
-                        for (AppDescribeItem e : appDescribeItemList) {
-                            if (!e.appDescribe.coordinateList.isEmpty() || !e.appDescribe.widgetList.isEmpty()) {
-                                listTemp.add(e);
-                            }
-                        }
-                        break;
-                    case "@未创建规则":
-                        for (AppDescribeItem e : appDescribeItemList) {
-                            if (e.appDescribe.coordinateList.isEmpty() && e.appDescribe.widgetList.isEmpty()) {
-                                listTemp.add(e);
-                            }
-                        }
-                        break;
-                    case "@已安装应用":
-                        for (AppDescribeItem e : appDescribeItemList) {
-                            if (e.isInstalled) {
-                                listTemp.add(e);
-                            }
-                        }
-                        break;
-                    case "@未安装应用":
-                        for (AppDescribeItem e : appDescribeItemList) {
-                            if (!e.isInstalled) {
-                                listTemp.add(e);
-                            }
-                        }
-                        break;
-                    case "@已选中选项":
-                        for (AppDescribeItem e : appDescribeItemList) {
-                            if (e.isSelected) {
-                                listTemp.add(e);
-                            }
-                        }
-                        break;
-                    case "@未选中选项":
-                        for (AppDescribeItem e : appDescribeItemList) {
-                            if (!e.isSelected) {
-                                listTemp.add(e);
-                            }
-                        }
-                        break;
-                    case "@非必要不开启应用":
-                        for (AppDescribeItem e : appDescribeItemList) {
-                            if (pkgSuggestNotOnList.contains(e.appDescribe.appPackage)) {
-                                listTemp.add(e);
-                            }
-                        }
-                        break;
-                    default:
-                        String str = constraint.toLowerCase();
-                        for (AppDescribeItem e : appDescribeItemList) {
-                            if (e.appDescribe.appName.toLowerCase().contains(str) || e.appDescribe.appPackage.contains(str)) {
-                                listTemp.add(e);
-                            }
-                        }
-                        break;
+                if (pendingSearch != null) {
+                    listDataBinding.searchBox.removeCallbacks(pendingSearch);
                 }
-                appDescribeItemFilterList.clear();
-                appDescribeItemFilterList.addAll(listTemp);
-                listDataBinding.cbSelectAll.setChecked(false);
-                myAdapter.notifyDataSetChanged();
+                pendingSearch = new Runnable() {
+                    @Override
+                    public void run() {
+                        applySearchFilter(constraint);
+                    }
+                };
+                listDataBinding.searchBox.postDelayed(pendingSearch, SEARCH_DEBOUNCE_MILLIS);
             }
         });
 
@@ -378,6 +284,102 @@ public class ListDataActivity extends BaseActivity {
         loadAppDescribeItems();
     }
 
+    private void applySearchFilter(String constraint) {
+        List<AppDescribeItem> listTemp = new ArrayList<>();
+        switch (constraint) {
+            case "@开启":
+                for (AppDescribeItem item : appDescribeItemList) {
+                    if (item.appDescribe.coordinateOnOff || item.appDescribe.widgetOnOff) {
+                        listTemp.add(item);
+                    }
+                }
+                break;
+            case "@关闭":
+                for (AppDescribeItem item : appDescribeItemList) {
+                    if (!item.appDescribe.coordinateOnOff && !item.appDescribe.widgetOnOff) {
+                        listTemp.add(item);
+                    }
+                }
+                break;
+            case "@普通应用":
+                for (AppDescribeItem item : appDescribeItemList) {
+                    if (!item.isSysApp) {
+                        listTemp.add(item);
+                    }
+                }
+                break;
+            case "@系统应用":
+                for (AppDescribeItem item : appDescribeItemList) {
+                    if (item.isSysApp) {
+                        listTemp.add(item);
+                    }
+                }
+                break;
+            case "@已创建规则":
+                for (AppDescribeItem item : appDescribeItemList) {
+                    if (!item.appDescribe.coordinateList.isEmpty() || !item.appDescribe.widgetList.isEmpty()) {
+                        listTemp.add(item);
+                    }
+                }
+                break;
+            case "@未创建规则":
+                for (AppDescribeItem item : appDescribeItemList) {
+                    if (item.appDescribe.coordinateList.isEmpty() && item.appDescribe.widgetList.isEmpty()) {
+                        listTemp.add(item);
+                    }
+                }
+                break;
+            case "@已安装应用":
+                for (AppDescribeItem item : appDescribeItemList) {
+                    if (item.isInstalled) {
+                        listTemp.add(item);
+                    }
+                }
+                break;
+            case "@未安装应用":
+                for (AppDescribeItem item : appDescribeItemList) {
+                    if (!item.isInstalled) {
+                        listTemp.add(item);
+                    }
+                }
+                break;
+            case "@已选中选项":
+                for (AppDescribeItem item : appDescribeItemList) {
+                    if (item.isSelected) {
+                        listTemp.add(item);
+                    }
+                }
+                break;
+            case "@未选中选项":
+                for (AppDescribeItem item : appDescribeItemList) {
+                    if (!item.isSelected) {
+                        listTemp.add(item);
+                    }
+                }
+                break;
+            case "@非必要不开启应用":
+                for (AppDescribeItem item : appDescribeItemList) {
+                    if (pkgSuggestNotOnList.contains(item.appDescribe.appPackage)) {
+                        listTemp.add(item);
+                    }
+                }
+                break;
+            default:
+                String normalized = constraint.toLowerCase(Locale.ROOT);
+                for (AppDescribeItem item : appDescribeItemList) {
+                    if (item.appDescribe.appName.toLowerCase(Locale.ROOT).contains(normalized)
+                            || item.appDescribe.appPackage.toLowerCase(Locale.ROOT).contains(normalized)) {
+                        listTemp.add(item);
+                    }
+                }
+                break;
+        }
+        appDescribeItemFilterList.clear();
+        appDescribeItemFilterList.addAll(listTemp);
+        listDataBinding.cbSelectAll.setChecked(false);
+        myAdapter.notifyDataSetChanged();
+    }
+
     private void loadAppDescribeItems() {
         listDataBinding.recyclerView.setVisibility(View.INVISIBLE);
         listDataBinding.searchBox.setVisibility(View.INVISIBLE);
@@ -387,44 +389,60 @@ public class ListDataActivity extends BaseActivity {
             public void run() {
                 try {
                     List<AppDescribe> describes = new ArrayList<>(dataDao.getAllAppDescribes());
+                    List<Coordinate> coordinates = dataDao.getAllCoordinates();
+                    List<Widget> widgets = dataDao.getAllWidgets();
+                    AppDescribe.attachRules(describes, coordinates, widgets);
                     describes.sort(new Comparator<AppDescribe>() {
                         @Override
                         public int compare(AppDescribe o1, AppDescribe o2) {
                             return Collator.getInstance(Locale.CHINESE).compare(o1.appName, o2.appName);
                         }
                     });
-                    List<AppDescribeItem> onList = new ArrayList<>();
-                    List<AppDescribeItem> offList = new ArrayList<>();
-                    Drawable uninstalledIcon = ResourcesCompat.getDrawable(getResources(), R.drawable.app_uninstalled, null);
-                    for (AppDescribe appDescribe : describes) {
-                        appDescribe.getOtherFieldsFromDatabase(dataDao);
-                        AppDescribeItem item = new AppDescribeItem(appDescribe, uninstalledIcon, false, false);
-                        try {
-                            PackageInfo packageInfo = packageManager.getPackageInfo(appDescribe.appPackage, PackageManager.GET_META_DATA);
-                            String label = packageInfo.applicationInfo.loadLabel(packageManager).toString();
-                            item.appIcon = packageInfo.applicationInfo.loadIcon(packageManager);
-                            item.isSysApp = (packageInfo.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) == ApplicationInfo.FLAG_SYSTEM;
-                            item.isInstalled = true;
-                            if (!TextUtils.equals(appDescribe.appName, label)) {
-                                appDescribe.appName = label;
-                                dataDao.updateAppDescribe(appDescribe);
-                            }
-                        } catch (PackageManager.NameNotFoundException ignored) {
-                        }
-                        if (appDescribe.coordinateOnOff || appDescribe.widgetOnOff) {
-                            onList.add(item);
-                        } else {
-                            offList.add(item);
-                        }
-                    }
-                    List<AppDescribeItem> items = new ArrayList<>(onList);
-                    items.addAll(offList);
-                    MyApplication.postToMain(() -> showLoadedItems(describes, items));
+                    MyApplication.executeIo(() -> prepareAppDescribeItems(describes));
                 } catch (RuntimeException e) {
                     MyApplication.postToMain(() -> showLoadError(e));
                 }
             }
         });
+    }
+
+    private void prepareAppDescribeItems(List<AppDescribe> describes) {
+        try {
+            pkgSuggestNotOnList.clear();
+            pkgSuggestNotOnList.addAll(PackageCatalog.getSuggestedRestrictedPackages(context));
+            List<AppDescribeItem> onList = new ArrayList<>();
+            List<AppDescribeItem> offList = new ArrayList<>();
+            List<AppDescribe> renamedDescribes = new ArrayList<>();
+            for (AppDescribe appDescribe : describes) {
+                AppDescribeItem item = new AppDescribeItem(appDescribe, false, false);
+                try {
+                    PackageInfo packageInfo = packageManager.getPackageInfo(
+                            appDescribe.appPackage, PackageManager.GET_META_DATA);
+                    String label = packageInfo.applicationInfo.loadLabel(packageManager).toString();
+                    item.isSysApp = (packageInfo.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM)
+                            == ApplicationInfo.FLAG_SYSTEM;
+                    item.isInstalled = true;
+                    if (!TextUtils.equals(appDescribe.appName, label)) {
+                        appDescribe.appName = label;
+                        renamedDescribes.add(appDescribe);
+                    }
+                } catch (PackageManager.NameNotFoundException ignored) {
+                }
+                if (appDescribe.coordinateOnOff || appDescribe.widgetOnOff) {
+                    onList.add(item);
+                } else {
+                    offList.add(item);
+                }
+            }
+            if (!renamedDescribes.isEmpty()) {
+                dataDao.updateAppDescribes(renamedDescribes);
+            }
+            List<AppDescribeItem> items = new ArrayList<>(onList);
+            items.addAll(offList);
+            MyApplication.postToMain(() -> showLoadedItems(describes, items));
+        } catch (RuntimeException e) {
+            MyApplication.postToMain(() -> showLoadError(e));
+        }
     }
 
     private void showLoadedItems(List<AppDescribe> describes, List<AppDescribeItem> items) {
@@ -495,17 +513,25 @@ public class ListDataActivity extends BaseActivity {
         startActivity(Intent.createChooser(intent, "保存"));
     }
 
+    @Override
+    protected void onDestroy() {
+        if (pendingSearch != null && listDataBinding != null) {
+            listDataBinding.searchBox.removeCallbacks(pendingSearch);
+        }
+        iconLoadsInFlight.clear();
+        iconCache.evictAll();
+        super.onDestroy();
+    }
+
     static class AppDescribeItem {
         AppDescribe appDescribe;
-        Drawable appIcon;
         boolean isSysApp;
         boolean isInstalled;
         boolean isSelected;
         long longNoTriggerCount;
 
-        public AppDescribeItem(AppDescribe appDescribe, Drawable appIcon, boolean isSysApp, boolean isInstalled) {
+        public AppDescribeItem(AppDescribe appDescribe, boolean isSysApp, boolean isInstalled) {
             this.appDescribe = appDescribe;
-            this.appIcon = appIcon;
             this.isSysApp = isSysApp;
             this.isInstalled = isInstalled;
             this.refreshExistLongNoTrigger();
@@ -535,9 +561,10 @@ public class ListDataActivity extends BaseActivity {
         @Override
         public void onBindViewHolder(@androidx.annotation.NonNull ViewHolder holder, int position) {
             final AppDescribeItem item = appDescribeItemFilterList.get(position);
+            holder.boundPackage = item.appDescribe.appPackage;
             holder.itemAppBinding.name.setText(StrUtil.blankToDefault(item.appDescribe.appName, "读取失败，无权限或未安装"));
             holder.itemAppBinding.pkg.setText(item.appDescribe.appPackage);
-            holder.itemAppBinding.img.setImageDrawable(item.appIcon);
+            bindAppIcon(holder, item);
             holder.itemAppBinding.onOff.setChecked(item.appDescribe.coordinateOnOff || item.appDescribe.widgetOnOff);
             holder.itemAppBinding.cbSelect.setChecked(item.isSelected);
             holder.itemAppBinding.cbSelect.setVisibility(listDataBinding.llSelect.getVisibility());
@@ -550,8 +577,67 @@ public class ListDataActivity extends BaseActivity {
             return appDescribeItemFilterList.size();
         }
 
+        @Override
+        public void onViewRecycled(@androidx.annotation.NonNull ViewHolder holder) {
+            holder.boundPackage = null;
+            holder.itemAppBinding.img.setImageDrawable(null);
+            super.onViewRecycled(holder);
+        }
+
+        private void bindAppIcon(ViewHolder holder, AppDescribeItem item) {
+            String appPackage = item.appDescribe.appPackage;
+            Drawable.ConstantState cachedState = iconCache.get(appPackage);
+            if (cachedState != null) {
+                holder.itemAppBinding.img.setImageDrawable(cachedState.newDrawable(getResources()));
+                return;
+            }
+            holder.itemAppBinding.img.setImageResource(item.isInstalled
+                    ? android.R.drawable.sym_def_app_icon
+                    : R.drawable.app_uninstalled);
+            if (!item.isInstalled || !iconLoadsInFlight.add(appPackage)) {
+                return;
+            }
+            MyApplication.executeIo(new Runnable() {
+                @Override
+                public void run() {
+                    Drawable icon = null;
+                    Drawable.ConstantState constantState = null;
+                    try {
+                        ApplicationInfo applicationInfo = packageManager.getApplicationInfo(
+                                appPackage, PackageManager.GET_META_DATA);
+                        icon = applicationInfo.loadIcon(packageManager);
+                        constantState = icon.getConstantState();
+                        if (constantState != null) {
+                            iconCache.put(appPackage, constantState);
+                        }
+                    } catch (PackageManager.NameNotFoundException ignored) {
+                    } finally {
+                        iconLoadsInFlight.remove(appPackage);
+                    }
+                    Drawable loadedIcon = icon;
+                    Drawable.ConstantState loadedState = constantState;
+                    MyApplication.postToMain(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (!TextUtils.equals(holder.boundPackage, appPackage)
+                                    || isFinishing() || isDestroyed()) {
+                                return;
+                            }
+                            if (loadedState != null) {
+                                holder.itemAppBinding.img.setImageDrawable(
+                                        loadedState.newDrawable(getResources()));
+                            } else if (loadedIcon != null) {
+                                holder.itemAppBinding.img.setImageDrawable(loadedIcon);
+                            }
+                        }
+                    });
+                }
+            });
+        }
+
         public class ViewHolder extends RecyclerView.ViewHolder {
             public ViewItemAppBinding itemAppBinding;
+            private String boundPackage;
 
             public ViewHolder(ViewItemAppBinding binding) {
                 super(binding.getRoot());

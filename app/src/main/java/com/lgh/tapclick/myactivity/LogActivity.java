@@ -61,7 +61,12 @@ public class LogActivity extends BaseActivity {
     @Override
     protected void onStart() {
         super.onStart();
-        logBinding.log.setText(MyUtils.getLog());
+        boolean loggingEnabled = MyUtils.getRuntimeLoggingEnabled();
+        String log = loggingEnabled
+                ? MyUtils.getLog()
+                : "运行日志已关闭，可在应用设置中开启";
+        logBinding.log.setText(log);
+        logBinding.export.setEnabled(loggingEnabled);
         logBinding.scroll.post(() -> logBinding.scroll.fullScroll(View.FOCUS_DOWN));
     }
 }

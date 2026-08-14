@@ -14,6 +14,8 @@ import android.graphics.Rect;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.Editable;
 import android.text.TextUtils;
 import android.text.TextWatcher;
@@ -21,8 +23,6 @@ import android.util.DisplayMetrics;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
-import android.view.inputmethod.InputMethodInfo;
-import android.view.inputmethod.InputMethodManager;
 import android.widget.Toast;
 
 import androidx.activity.OnBackPressedCallback;
@@ -49,10 +49,12 @@ import com.lgh.tapclick.mybean.WidgetShare;
 import com.lgh.tapclick.myclass.DataDao;
 import com.lgh.tapclick.myclass.ExportFileManager;
 import com.lgh.tapclick.myclass.MyApplication;
+import com.lgh.tapclick.myclass.PackageCatalog;
 import com.lgh.tapclick.myfunction.MyUtils;
 
 import java.io.File;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
@@ -64,6 +66,8 @@ import cn.hutool.core.util.StrUtil;
 import cn.hutool.crypto.digest.DigestUtil;
 
 public class EditDataActivity extends BaseActivity {
+    private static final long SAVE_DEBOUNCE_MILLIS = 400;
+
     private AppDescribe appDescribe;
     private Context context;
     private LayoutInflater inflater;
@@ -77,6 +81,16 @@ public class EditDataActivity extends BaseActivity {
     private Set<String> pkgSuggestNotOnList;
     private String packageName;
     private Gson gson;
+    private Handler saveHandler;
+    private final Set<Coordinate> dirtyCoordinates = new HashSet<>();
+    private final Set<Widget> dirtyWidgets = new HashSet<>();
+    private boolean appDescribeDirty;
+    private final Runnable persistChangesRunnable = new Runnable() {
+        @Override
+        public void run() {
+            flushPendingChanges(false);
+        }
+    };
 
     @SuppressLint("ClickableViewAccessibility")
     @Override
@@ -97,6 +111,7 @@ public class EditDataActivity extends BaseActivity {
 
         context = getApplicationContext();
         dataDao = MyApplication.dataDao;
+        saveHandler = new Handler(Looper.getMainLooper());
         MyApplication.queryDatabase(dataDao::getMyAppConfig, result -> {
             myAppConfig = result;
             if (myAppConfig.autoHideOnTaskList) {
@@ -109,24 +124,7 @@ public class EditDataActivity extends BaseActivity {
         metrics = new DisplayMetrics();
         getWindowManager().getDefaultDisplay().getRealMetrics(metrics);
 
-        Set<String> pkgSysSet = getPackageManager().
-                getInstalledPackages(PackageManager.MATCH_SYSTEM_ONLY)
-                .stream().map(e -> e.packageName)
-                .collect(Collectors.toSet());
-        Set<String> pkgInputMethodSet = getSystemService(InputMethodManager.class)
-                .getInputMethodList()
-                .stream()
-                .map(InputMethodInfo::getPackageName)
-                .collect(Collectors.toSet());
-        Set<String> pkgHasHomeSet = getPackageManager()
-                .queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), PackageManager.MATCH_ALL)
-                .stream()
-                .map(e -> e.activityInfo.packageName)
-                .collect(Collectors.toSet());
-        pkgSuggestNotOnList = new HashSet<>();
-        pkgSuggestNotOnList.addAll(pkgSysSet);
-        pkgSuggestNotOnList.addAll(pkgInputMethodSet);
-        pkgSuggestNotOnList.addAll(pkgHasHomeSet);
+        pkgSuggestNotOnList = PackageCatalog.getSuggestedRestrictedPackages(context);
 
         LayoutTransition transition = new LayoutTransition();
         transition.enableTransitionType(LayoutTransition.CHANGING);
@@ -214,9 +212,9 @@ public class EditDataActivity extends BaseActivity {
                 appDescribe.widgetOnOff = baseSettingBinding.widgetSwitch.isChecked();
                 appDescribe.widgetRetrieveTime = widgetTime.equals("∞") ? appDescribe.widgetRetrieveTime : Integer.parseInt(widgetTime);
                 appDescribe.widgetRetrieveAllTime = baseSettingBinding.widgetRetrieveAllTime.isChecked();
-                MyApplication.executeDatabase(() -> dataDao.updateAppDescribe(appDescribe));
+                queueAppDescribeSave();
                 editDataBinding.baseSettingModify.setTextColor(0xff000000);
-                editDataBinding.baseSettingModify.setText(dateFormatModify.format(new Date()) + " (修改成功)");
+                editDataBinding.baseSettingModify.setText(dateFormatModify.format(new Date()) + " (已修改)");
             }
         };
 
@@ -363,9 +361,9 @@ public class EditDataActivity extends BaseActivity {
                     coordinate.clickInterval = Integer.parseInt(sInterval);
                     coordinate.clickNumber = Integer.parseInt(sNumber);
                     coordinate.comment = StrUtil.trimToEmpty(coordinateBinding.coordinateComment.getText());
-                    MyApplication.executeDatabase(() -> dataDao.updateCoordinate(coordinate));
+                    queueCoordinateSave(coordinate);
                     coordinateBinding.coordinateModify.setTextColor(0xff000000);
-                    coordinateBinding.coordinateModify.setText(dateFormatModify.format(new Date()) + " (修改成功)");
+                    coordinateBinding.coordinateModify.setText(dateFormatModify.format(new Date()) + " (已修改)");
                 }
             };
 
@@ -425,6 +423,7 @@ public class EditDataActivity extends BaseActivity {
                             .setPositiveButton("确定", new DialogInterface.OnClickListener() {
                                 @Override
                                 public void onClick(DialogInterface dialog, int which) {
+                                    dirtyCoordinates.remove(coordinate);
                                     MyApplication.executeDatabase(() -> dataDao.deleteCoordinate(coordinate));
                                     appDescribe.coordinateList.remove(coordinate);
                                     editDataBinding.coordinateLayout.removeView(coordinateBinding.getRoot());
@@ -436,7 +435,7 @@ public class EditDataActivity extends BaseActivity {
                                             baseSettingBinding.widgetSwitch.setChecked(false);
                                             appDescribe.widgetOnOff = false;
                                         }
-                                        MyApplication.executeDatabase(() -> dataDao.updateAppDescribe(appDescribe));
+                                        queueAppDescribeSave();
                                     }
                                 }
                             }).create().show();
@@ -556,9 +555,9 @@ public class EditDataActivity extends BaseActivity {
                     widget.debounceDelay = Integer.parseInt(debounceDelay);
                     widget.noRepeat = widgetBinding.widgetNoRepeat.isChecked();
                     widget.clickOnly = widgetBinding.widgetClickOnly.isChecked();
-                    MyApplication.executeDatabase(() -> dataDao.updateWidget(widget));
+                    queueWidgetSave(widget);
                     widgetBinding.widgetModify.setTextColor(0xff000000);
-                    widgetBinding.widgetModify.setText(dateFormatModify.format(new Date()) + " (修改成功)");
+                    widgetBinding.widgetModify.setText(dateFormatModify.format(new Date()) + " (已修改)");
                 }
             };
 
@@ -650,6 +649,7 @@ public class EditDataActivity extends BaseActivity {
                             .setPositiveButton("确定", new DialogInterface.OnClickListener() {
                                 @Override
                                 public void onClick(DialogInterface dialog, int which) {
+                                    dirtyWidgets.remove(widget);
                                     MyApplication.executeDatabase(() -> dataDao.deleteWidget(widget));
                                     appDescribe.widgetList.remove(widget);
                                     editDataBinding.widgetLayout.removeView(widgetBinding.getRoot());
@@ -661,7 +661,7 @@ public class EditDataActivity extends BaseActivity {
                                             baseSettingBinding.coordinateSwitch.setChecked(false);
                                             appDescribe.coordinateOnOff = false;
                                         }
-                                        MyApplication.executeDatabase(() -> dataDao.updateAppDescribe(appDescribe));
+                                        queueAppDescribeSave();
                                     }
                                 }
                             }).create().show();
@@ -675,16 +675,73 @@ public class EditDataActivity extends BaseActivity {
     protected void onPause() {
         super.onPause();
         if (appDescribe != null) {
-            MyApplication.executeDatabase(() -> MyUtils.requestUpdateAppDescribe(appDescribe.appPackage));
+            flushPendingChanges(true);
         }
     }
 
     @Override
     protected void onDestroy() {
+        if (saveHandler != null) {
+            saveHandler.removeCallbacks(persistChangesRunnable);
+        }
         super.onDestroy();
         if (myAppConfig != null && myAppConfig.autoHideOnTaskList) {
             MyUtils.setExcludeFromRecents(true);
         }
+    }
+
+    private void queueAppDescribeSave() {
+        appDescribeDirty = true;
+        schedulePendingChanges();
+    }
+
+    private void queueCoordinateSave(Coordinate coordinate) {
+        dirtyCoordinates.add(coordinate);
+        schedulePendingChanges();
+    }
+
+    private void queueWidgetSave(Widget widget) {
+        dirtyWidgets.add(widget);
+        schedulePendingChanges();
+    }
+
+    private void schedulePendingChanges() {
+        saveHandler.removeCallbacks(persistChangesRunnable);
+        saveHandler.postDelayed(persistChangesRunnable, SAVE_DEBOUNCE_MILLIS);
+    }
+
+    private void flushPendingChanges(boolean notifyService) {
+        if (saveHandler == null) {
+            return;
+        }
+        saveHandler.removeCallbacks(persistChangesRunnable);
+        AppDescribe appDescribeSnapshot = appDescribeDirty ? appDescribe : null;
+        List<Coordinate> coordinates = new ArrayList<>(dirtyCoordinates);
+        List<Widget> widgets = new ArrayList<>(dirtyWidgets);
+        appDescribeDirty = false;
+        dirtyCoordinates.clear();
+        dirtyWidgets.clear();
+        String packageToRefresh = appDescribe == null ? null : appDescribe.appPackage;
+        if (appDescribeSnapshot == null && coordinates.isEmpty() && widgets.isEmpty() && !notifyService) {
+            return;
+        }
+        MyApplication.executeDatabase(new Runnable() {
+            @Override
+            public void run() {
+                if (appDescribeSnapshot != null) {
+                    dataDao.updateAppDescribe(appDescribeSnapshot);
+                }
+                if (!coordinates.isEmpty()) {
+                    dataDao.updateCoordinates(coordinates);
+                }
+                if (!widgets.isEmpty()) {
+                    dataDao.updateWidgets(widgets);
+                }
+                if (notifyService && !TextUtils.isEmpty(packageToRefresh)) {
+                    MyUtils.requestUpdateAppDescribe(packageToRefresh);
+                }
+            }
+        });
     }
 
     private void showEditShareFileNameDialog(String strRegulation) {

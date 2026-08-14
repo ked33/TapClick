@@ -65,6 +65,7 @@ public class MyContentProvider extends ContentProvider {
 
     @Override
     public int update(@NonNull Uri uri, ContentValues values, String selection, String[] selectionArgs) {
+        updateRuntimeLogging(values);
         if (MyAccessibilityService.mainFunction != null) {
             MainFunction mainFunction = MyAccessibilityService.mainFunction;
             updateData(mainFunction, values);
@@ -75,6 +76,18 @@ public class MyContentProvider extends ContentProvider {
             showAddDataWindow(mainFunction, values);
         }
         return 1;
+    }
+
+    private void updateRuntimeLogging(ContentValues values) {
+        String updateScope = values.getAsString("updateScope");
+        Boolean enable = values.getAsBoolean("value");
+        if (!TextUtils.equals(updateScope, "runtimeLogging") || Objects.isNull(enable)) {
+            return;
+        }
+        MyUtils.setRuntimeLoggingEnabled(enable);
+        if (MyAccessibilityService.mainFunction != null) {
+            MyAccessibilityService.mainFunction.setRuntimeLoggingEnabled(enable);
+        }
     }
 
     private void updateData(MainFunction mainFunction, ContentValues values) {

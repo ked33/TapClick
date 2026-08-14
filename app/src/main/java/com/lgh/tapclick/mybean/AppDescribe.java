@@ -93,6 +93,61 @@ public class AppDescribe {
         widgetSetMap = groupWidgetsByActivity(widgetList);
     }
 
+    public static void attachRules(List<AppDescribe> appDescribes,
+                                   List<Coordinate> coordinates,
+                                   List<Widget> widgets) {
+        Map<String, AppDescribe> describesByPackage = new HashMap<>();
+        for (AppDescribe describe : appDescribes) {
+            describe.coordinateList = new ArrayList<>();
+            describe.widgetList = new ArrayList<>();
+            describesByPackage.put(describe.appPackage, describe);
+        }
+        for (Coordinate coordinate : coordinates) {
+            AppDescribe describe = describesByPackage.get(coordinate.appPackage);
+            if (describe != null) {
+                describe.coordinateList.add(coordinate);
+            }
+        }
+        for (Widget widget : widgets) {
+            AppDescribe describe = describesByPackage.get(widget.appPackage);
+            if (describe != null) {
+                widget.preparePatterns();
+                describe.widgetList.add(widget);
+            }
+        }
+        for (AppDescribe describe : appDescribes) {
+            describe.coordinateSetMap = groupCoordinatesByActivity(describe.coordinateList);
+            describe.widgetSetMap = groupWidgetsByActivity(describe.widgetList);
+        }
+    }
+
+    public static Map<String, AppDescribe> buildRuntimeSnapshot(List<AppDescribe> appDescribes,
+                                                                 List<Coordinate> coordinates,
+                                                                 List<Widget> widgets) {
+        List<AppDescribe> enabledDescribes = new ArrayList<>();
+        for (AppDescribe describe : appDescribes) {
+            if (describe.coordinateOnOff || describe.widgetOnOff) {
+                enabledDescribes.add(describe);
+            }
+        }
+        attachRules(enabledDescribes, coordinates, widgets);
+        Map<String, AppDescribe> snapshot = new HashMap<>();
+        for (AppDescribe describe : enabledDescribes) {
+            if (!describe.coordinateOnOff) {
+                describe.coordinateList.clear();
+                describe.coordinateSetMap.clear();
+            }
+            if (!describe.widgetOnOff) {
+                describe.widgetList.clear();
+                describe.widgetSetMap.clear();
+            }
+            if (!describe.coordinateSetMap.isEmpty() || !describe.widgetSetMap.isEmpty()) {
+                snapshot.put(describe.appPackage, describe);
+            }
+        }
+        return snapshot;
+    }
+
     public static Map<String, List<Coordinate>> groupCoordinatesByActivity(List<Coordinate> coordinates) {
         Map<String, List<Coordinate>> result = new HashMap<>();
         for (Coordinate coordinate : coordinates) {
