@@ -9,10 +9,8 @@ import com.lgh.tapclick.myclass.DataDao;
 
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 @Entity(indices = @Index(value = {"appPackage"}, unique = true))
 public class AppDescribe {
@@ -27,9 +25,9 @@ public class AppDescribe {
     public boolean coordinateOnOff;
     public boolean widgetOnOff;
     @Ignore
-    public transient Map<String, Set<Coordinate>> coordinateSetMap;
+    public transient Map<String, List<Coordinate>> coordinateSetMap;
     @Ignore
-    public transient Map<String, Set<Widget>> widgetSetMap;
+    public transient Map<String, List<Widget>> widgetSetMap;
     @Ignore
     public transient List<Coordinate> coordinateList;
     @Ignore
@@ -48,6 +46,18 @@ public class AppDescribe {
         this.widgetSetMap = new HashMap<>();
         this.coordinateList = new ArrayList<>();
         this.widgetList = new ArrayList<>();
+    }
+
+    public AppDescribe(AppDescribe appDescribe) {
+        this();
+        this.appName = appDescribe.appName;
+        this.appPackage = appDescribe.appPackage;
+        this.coordinateRetrieveTime = appDescribe.coordinateRetrieveTime;
+        this.coordinateRetrieveAllTime = appDescribe.coordinateRetrieveAllTime;
+        this.widgetRetrieveTime = appDescribe.widgetRetrieveTime;
+        this.widgetRetrieveAllTime = appDescribe.widgetRetrieveAllTime;
+        this.coordinateOnOff = appDescribe.coordinateOnOff;
+        this.widgetOnOff = appDescribe.widgetOnOff;
     }
 
     public void copy(AppDescribe appDescribe) {
@@ -71,31 +81,32 @@ public class AppDescribe {
     }
 
     public void getCoordinateFromDatabase(DataDao dataDao) {
-        coordinateSetMap.clear();
-        coordinateList.clear();
-        coordinateList.addAll(dataDao.getCoordinatesByPackage(this.appPackage));
-        for (Coordinate e : coordinateList) {
-            Set<Coordinate> coordinateSet = this.coordinateSetMap.get(e.appActivity);
-            if (coordinateSet == null) {
-                coordinateSet = new HashSet<>();
-                coordinateSetMap.put(e.appActivity, coordinateSet);
-            }
-            coordinateSet.add(e);
-        }
+        coordinateList = new ArrayList<>(dataDao.getCoordinatesByPackage(this.appPackage));
+        coordinateSetMap = groupCoordinatesByActivity(coordinateList);
     }
 
     public void getWidgetFromDatabase(DataDao dataDao) {
-        widgetSetMap.clear();
-        widgetList.clear();
-        widgetList.addAll(dataDao.getWidgetsByPackage(this.appPackage));
-        for (Widget e : widgetList) {
-            Set<Widget> widgetSet = this.widgetSetMap.get(e.appActivity);
-            if (widgetSet == null) {
-                widgetSet = new HashSet<>();
-                widgetSetMap.put(e.appActivity, widgetSet);
-            }
-            widgetSet.add(e);
+        widgetList = new ArrayList<>(dataDao.getWidgetsByPackage(this.appPackage));
+        for (Widget widget : widgetList) {
+            widget.preparePatterns();
         }
+        widgetSetMap = groupWidgetsByActivity(widgetList);
+    }
+
+    public static Map<String, List<Coordinate>> groupCoordinatesByActivity(List<Coordinate> coordinates) {
+        Map<String, List<Coordinate>> result = new HashMap<>();
+        for (Coordinate coordinate : coordinates) {
+            result.computeIfAbsent(coordinate.appActivity, key -> new ArrayList<>()).add(coordinate);
+        }
+        return result;
+    }
+
+    public static Map<String, List<Widget>> groupWidgetsByActivity(List<Widget> widgets) {
+        Map<String, List<Widget>> result = new HashMap<>();
+        for (Widget widget : widgets) {
+            result.computeIfAbsent(widget.appActivity, key -> new ArrayList<>()).add(widget);
+        }
+        return result;
     }
 
     @Override

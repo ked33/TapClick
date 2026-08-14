@@ -11,23 +11,16 @@ import android.text.TextUtils;
 
 import androidx.annotation.NonNull;
 
-import com.lgh.tapclick.mybean.AppDescribe;
-import com.lgh.tapclick.myclass.DataDao;
-import com.lgh.tapclick.myclass.MyApplication;
-
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 
 import cn.hutool.core.collection.ListUtil;
 
 public class MyContentProvider extends ContentProvider {
     private final Handler handler;
-    private final DataDao dataDao;
 
     public MyContentProvider() {
         handler = new Handler(Looper.getMainLooper());
-        dataDao = MyApplication.dataDao;
     }
 
     @Override
@@ -47,7 +40,7 @@ public class MyContentProvider extends ContentProvider {
 
     @Override
     public boolean onCreate() {
-        return false;
+        return true;
     }
 
     @Override
@@ -73,34 +66,29 @@ public class MyContentProvider extends ContentProvider {
     @Override
     public int update(@NonNull Uri uri, ContentValues values, String selection, String[] selectionArgs) {
         if (MyAccessibilityService.mainFunction != null) {
-            updateData(MyAccessibilityService.mainFunction.getAppDescribeMap(), values);
-            updateAllDate(MyAccessibilityService.mainFunction.getAppDescribeMap(), values);
-            updateKeepAlive(MyAccessibilityService.mainFunction, values);
-            showDbClickSetting(MyAccessibilityService.mainFunction, values);
-            showDbClickFloating(MyAccessibilityService.mainFunction, values);
-            showAddDataWindow(MyAccessibilityService.mainFunction, values);
+            MainFunction mainFunction = MyAccessibilityService.mainFunction;
+            updateData(mainFunction, values);
+            updateAllData(mainFunction, values);
+            updateKeepAlive(mainFunction, values);
+            showDbClickSetting(mainFunction, values);
+            showDbClickFloating(mainFunction, values);
+            showAddDataWindow(mainFunction, values);
         }
         return 1;
     }
 
-    private void updateData(Map<String, AppDescribe> appDescribeMap, ContentValues values) {
+    private void updateData(MainFunction mainFunction, ContentValues values) {
         String updateScope = values.getAsString("updateScope");
         String packageName = values.getAsString("packageName");
         if (TextUtils.isEmpty(updateScope) || TextUtils.isEmpty(packageName)) {
             return;
         }
         if (TextUtils.equals(updateScope, "updateAppDescribe")) {
-            AppDescribe newAppDescribe = dataDao.getAppDescribeByPackage(packageName);
-            if (newAppDescribe != null) {
-                newAppDescribe.getOtherFieldsFromDatabase(dataDao);
-                appDescribeMap.put(newAppDescribe.appPackage, newAppDescribe);
-            }
+            mainFunction.refreshAppDescribe(packageName);
         }
         if (TextUtils.equals(updateScope, "removeAppDescribe")) {
             List<String> packages = ListUtil.toList(packageName.split(","));
-            for (String pkg : packages) {
-                appDescribeMap.remove(pkg);
-            }
+            mainFunction.removeAppDescribes(packages);
         }
     }
 
@@ -111,9 +99,11 @@ public class MyContentProvider extends ContentProvider {
             return;
         }
         if (TextUtils.equals(updateScope, "keepAliveByNotification")) {
+            MyUtils.setKeepAliveByNotification(value);
             mainFunction.keepAliveByNotification(value);
         }
         if (TextUtils.equals(updateScope, "keepAliveByFloatingWindow")) {
+            MyUtils.setKeepAliveByFloatingWindow(value);
             handler.post(new Runnable() {
                 @Override
                 public void run() {
@@ -123,17 +113,12 @@ public class MyContentProvider extends ContentProvider {
         }
     }
 
-    private void updateAllDate(Map<String, AppDescribe> appDescribeMap, ContentValues values) {
+    private void updateAllData(MainFunction mainFunction, ContentValues values) {
         String updateScope = values.getAsString("updateScope");
         if (!TextUtils.equals(updateScope, "allDate")) {
             return;
         }
-        appDescribeMap.clear();
-        List<AppDescribe> appDescribeList = dataDao.getAllAppDescribes();
-        for (AppDescribe describe : appDescribeList) {
-            describe.getOtherFieldsFromDatabase(dataDao);
-            appDescribeMap.put(describe.appPackage, describe);
-        }
+        mainFunction.refreshAllData();
     }
 
     private void showDbClickSetting(MainFunction mainFunction, ContentValues values) {
@@ -155,6 +140,7 @@ public class MyContentProvider extends ContentProvider {
         if (!TextUtils.equals(updateScope, "showDbClickFloating") || Objects.isNull(enable)) {
             return;
         }
+        MyUtils.setDbClickEnable(enable);
         handler.post(new Runnable() {
             @Override
             public void run() {

@@ -13,17 +13,16 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  ANDROID_HOME: /usr/local/lib/android/sdk
+  ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
 jobs:
-  build:
-    name: Build arm64-v8a
+  verify:
+    name: Compile, test and lint
     runs-on: ubuntu-latest
-
-    env:
-      TARGET_ABI: arm64-v8a
-      ANDROID_HOME: /usr/local/lib/android/sdk
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
     steps:
       - name: Checkout
@@ -50,44 +49,105 @@ jobs:
             ${{ env.ANDROID_HOME }}/platform-tools
             ${{ env.ANDROID_HOME }}/licenses
             ${{ env.ANDROID_HOME }}/cmdline-tools
-          key: android-sdk-api34-bt34-${{ runner.os }}-v1
+          key: android-sdk-api36-bt36-${{ runner.os }}-v1
           restore-keys: |
-            android-sdk-api34-bt34-${{ runner.os }}-
-            android-sdk-api34-
+            android-sdk-api36-bt36-${{ runner.os }}-
+            android-sdk-api36-
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: tools platform-tools platforms;android-34 build-tools;34.0.0
+          packages: tools platform-tools platforms;android-36 build-tools;36.0.0
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Decode release keystore
-        if: ${{ github.event_name != 'pull_request' }}
+      - name: Compile, run unit tests and lint
+        run: |
+          ./gradlew \
+            :app:assembleDebug \
+            :app:testDebugUnitTest \
+            :app:lintDebug \
+            :app:assembleRelease \
+            --no-daemon \
+            --stacktrace \
+            --build-cache \
+            -Dorg.gradle.jvmargs="-Xmx3072m -Dfile.encoding=UTF-8"
+
+      - name: Upload verification APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: TapClick-verification-apks
+          path: app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload generated Room schemas
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: TapClick-room-schemas
+          path: app/schemas/
+          if-no-files-found: warn
+          retention-days: 14
+
+  release:
+    name: Sign and publish universal APK
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: tools platform-tools platforms;android-36 build-tools;36.0.0
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Validate release metadata and signing secrets
+        id: version
         env:
           SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          SIGNING_CERT_SHA256: ${{ secrets.SIGNING_CERT_SHA256 }}
         run: |
-          if [ -z "$SIGNING_KEYSTORE_BASE64" ]; then
-            echo "SIGNING_KEYSTORE_BASE64 secret is missing" >&2
-            exit 1
-          fi
-          echo "$SIGNING_KEYSTORE_BASE64" | base64 -d > "${GITHUB_WORKSPACE}/tapclick-release.jks"
-          echo "KEYSTORE_FILE=${GITHUB_WORKSPACE}/tapclick-release.jks" >> "$GITHUB_ENV"
-
-      - name: Extract version
-        id: version
-        run: |
+          for name in SIGNING_KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD SIGNING_CERT_SHA256; do
+            if [ -z "${!name}" ]; then
+              echo "Required release secret is missing: ${name}" >&2
+              exit 1
+            fi
+          done
           VERSION_NAME=$(grep -E 'versionName\s+"' app/build.gradle | head -1 | sed -E 's/.*versionName[[:space:]]+"([^"]+)".*/\1/')
           VERSION_CODE=$(grep -E 'versionCode\s+' app/build.gradle | head -1 | sed -E 's/.*versionCode[[:space:]]+([0-9]+).*/\1/')
+          if [ "${GITHUB_REF_NAME}" != "v${VERSION_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match versionName ${VERSION_NAME}" >&2
+            exit 1
+          fi
           echo "name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
           echo "code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
-          echo "tag=v${VERSION_NAME}" >> "$GITHUB_OUTPUT"
-          echo "Version name=${VERSION_NAME} code=${VERSION_CODE}"
+          printf '%s' "$SIGNING_KEYSTORE_BASE64" | base64 --decode > "${RUNNER_TEMP}/tapclick-release.jks"
+          echo "KEYSTORE_FILE=${RUNNER_TEMP}/tapclick-release.jks" >> "$GITHUB_ENV"
 
-      - name: Build Release APK (arm64-v8a only)
+      - name: Build signed release APK
         env:
-          KEYSTORE_FILE: ${{ env.KEYSTORE_FILE }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
@@ -96,55 +156,57 @@ jobs:
             --no-daemon \
             --stacktrace \
             --build-cache \
-            -Dorg.gradle.jvmargs="-Xmx2048m -Dfile.encoding=UTF-8"
+            -Dorg.gradle.jvmargs="-Xmx3072m -Dfile.encoding=UTF-8"
 
-      - name: Prepare dist APK
+      - name: Verify signature and prepare release files
         id: dist
+        env:
+          SIGNING_CERT_SHA256: ${{ secrets.SIGNING_CERT_SHA256 }}
         run: |
           mkdir -p dist
           SRC=$(find app/build/outputs/apk/release -type f -name "*.apk" | head -1)
           if [ -z "$SRC" ]; then
-            echo "No APK found" >&2
+            echo "No release APK found" >&2
             exit 1
           fi
-          DEST="dist/TapClick-v${{ steps.version.outputs.name }}-${TARGET_ABI}.apk"
+          DEST="dist/TapClick-v${{ steps.version.outputs.name }}-universal.apk"
           cp "$SRC" "$DEST"
+          APKSIGNER="${ANDROID_HOME}/build-tools/36.0.0/apksigner"
+          "$APKSIGNER" verify --verbose --print-certs "$DEST"
+          ACTUAL_CERT=$("$APKSIGNER" verify --print-certs "$DEST" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -1 | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
+          EXPECTED_CERT=$(printf '%s' "$SIGNING_CERT_SHA256" | tr -d ':[:space:]' | tr '[:lower:]' '[:upper:]')
+          if [ -z "$ACTUAL_CERT" ] || [ "$ACTUAL_CERT" != "$EXPECTED_CERT" ]; then
+            echo "Release signing certificate fingerprint mismatch" >&2
+            exit 1
+          fi
+          sha256sum "$DEST" > "${DEST}.sha256"
           echo "apk=${DEST}" >> "$GITHUB_OUTPUT"
-          ls -lh dist/
-          # 校验是否为正式签名（非 debug）
-          $ANDROID_HOME/build-tools/34.0.0/apksigner verify --print-certs "$DEST" || true
 
-      - name: Upload Release APK artifact
+      - name: Upload signed release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TapClick-release-${{ env.TARGET_ABI }}
-          path: dist/*.apk
+          name: TapClick-release-universal
+          path: dist/*
           if-no-files-found: error
           retention-days: 30
 
       - name: Publish GitHub Release
-        if: ${{ github.event_name != 'pull_request' }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || steps.version.outputs.tag }}
           name: TapClick ${{ steps.version.outputs.name }}
           body: |
             ## TapClick ${{ steps.version.outputs.name }} (versionCode ${{ steps.version.outputs.code }})
 
-            - ABI: **${{ env.TARGET_ABI }}** only
+            - APK: universal
             - Build: `${{ github.sha }}`
-            - Trigger: `${{ github.event_name }}` on `${{ github.ref_name }}`
-
-            ### 安装
-            下载下方 APK 直接安装（已使用 release 密钥签名）。
-          files: dist/*.apk
+            - Signature and SHA-256 checksum verified by CI
+          files: dist/*
           draft: false
           prerelease: false
           generate_release_notes: true
           make_latest: true
           fail_on_unmatched_files: true
 
-      - name: Shred keystore
-        if: ${{ always() && github.event_name != 'pull_request' }}
-        run: |
-          rm -f "${GITHUB_WORKSPACE}/tapclick-release.jks" || true
+      - name: Remove temporary keystore
+        if: ${{ always() }}
+        run: rm -f "${RUNNER_TEMP}/tapclick-release.jks"

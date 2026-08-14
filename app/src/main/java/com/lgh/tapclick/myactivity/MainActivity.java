@@ -24,7 +24,6 @@ import android.widget.Toast;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import com.lgh.tapclick.BuildConfig;
 import com.lgh.tapclick.R;
 import com.lgh.tapclick.databinding.ActivityMainBinding;
 import com.lgh.tapclick.databinding.ViewAccessibilityStatementBinding;
@@ -33,31 +32,21 @@ import com.lgh.tapclick.databinding.ViewNewRuleBinding;
 import com.lgh.tapclick.databinding.ViewPrivacyAgreementBinding;
 import com.lgh.tapclick.mybean.AppDescribe;
 import com.lgh.tapclick.mybean.CoordinateShare;
-import com.lgh.tapclick.mybean.LatestMessage;
-import com.lgh.tapclick.mybean.MyAppConfig;
 import com.lgh.tapclick.mybean.Regulation;
 import com.lgh.tapclick.mybean.RegulationExport;
 import com.lgh.tapclick.mybean.WidgetShare;
 import com.lgh.tapclick.myclass.DataDao;
 import com.lgh.tapclick.myclass.MyApplication;
+import com.lgh.tapclick.myclass.RegulationImportStore;
 import com.lgh.tapclick.myfunction.MyUtils;
 
 import java.io.FileNotFoundException;
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.Scanner;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-
-import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers;
-import io.reactivex.rxjava3.annotations.NonNull;
-import io.reactivex.rxjava3.core.Observable;
-import io.reactivex.rxjava3.core.Observer;
-import io.reactivex.rxjava3.disposables.Disposable;
-import io.reactivex.rxjava3.schedulers.Schedulers;
 
 public class MainActivity extends BaseActivity {
 
@@ -82,7 +71,6 @@ public class MainActivity extends BaseActivity {
         source.add(new Resource("规则管理", R.drawable.edit_data));
         source.add(new Resource("运行日志", R.drawable.log));
         source.add(new Resource("应用设置", R.drawable.setting));
-        source.add(new Resource("使用说明", R.drawable.instructions));
         BaseAdapter baseAdapter = new BaseAdapter() {
             @Override
             public int getCount() {
@@ -134,29 +122,18 @@ public class MainActivity extends BaseActivity {
                         startActivity(intent);
                         break;
                     }
-                    case 5: {
-                        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse("https://docs.qq.com/doc/DWXhWVmFodlJGRnhL"));
-                        startActivity(Intent.createChooser(intent, "选择浏览器"));
-                        break;
-                    }
                 }
             }
         });
 
-        SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd-HH", Locale.getDefault());
-        String forUpdate = dateFormat.format(new Date());
-        MyAppConfig myAppConfig = dataDao.getMyAppConfig();
-        if (!forUpdate.equals(myAppConfig.forUpdate)) {
-            myAppConfig.forUpdate = forUpdate;
-            dataDao.updateMyAppConfig(myAppConfig);
-            showUpdateInfo();
-        }
-        if (myAppConfig.autoHideOnTaskList) {
-            MyUtils.setExcludeFromRecents(true);
-        }
         if (MyUtils.getIsFirstStart()) {
             showPrivacyAgreement();
         }
+        MyApplication.queryDatabase(dataDao::getMyAppConfig, config -> {
+            if (config.autoHideOnTaskList) {
+                MyUtils.setExcludeFromRecents(true);
+            }
+        });
         handleImportRule(getIntent());
         // 触发允许读取应用列表授权弹窗
         getPackageManager().getInstalledPackages(PackageManager.GET_META_DATA);
@@ -189,139 +166,62 @@ public class MainActivity extends BaseActivity {
         }
     }
 
-    private void showUpdateInfo() {
-        Observable<LatestMessage> observable = MyApplication.myHttpRequest.getLatestMessage();
-        observable.subscribeOn(Schedulers.io()).observeOn(AndroidSchedulers.mainThread()).subscribe(new Observer<LatestMessage>() {
-            @Override
-            public void onSubscribe(@NonNull Disposable d) {
-            }
-
-            @Override
-            public void onNext(@NonNull LatestMessage latestMessage) {
-                try {
-                    String appName = latestMessage.assets.get(0).name;
-                    Matcher matcher = Pattern.compile("\\d+").matcher(appName);
-                    if (matcher.find()) {
-                        int newVersion = Integer.parseInt(matcher.group());
-                        if (newVersion > BuildConfig.VERSION_CODE) {
-                            Intent intent = new Intent(context, UpdateActivity.class);
-                            intent.putExtra("updateMessage", latestMessage.body);
-                            intent.putExtra("updateUrl", latestMessage.assets.get(0).browser_download_url);
-                            if (getPackageManager().resolveActivity(intent, PackageManager.MATCH_ALL) != null) {
-                                startActivity(intent);
-                            }
-                        }
-                    }
-                } catch (RuntimeException e) {
-                    // e.printStackTrace();
-                }
-            }
-
-            @Override
-            public void onError(@NonNull Throwable e) {
-                // e.printStackTrace();
-            }
-
-            @Override
-            public void onComplete() {
-            }
-        });
-    }
-
     private void showPrivacyAgreement() {
-        Observable<String> observable = MyApplication.myHttpRequest.getPrivacyAgreement();
-        observable.subscribeOn(Schedulers.io()).observeOn(AndroidSchedulers.mainThread()).subscribe(new Observer<String>() {
+        ViewPrivacyAgreementBinding privacyAgreementBinding = ViewPrivacyAgreementBinding.inflate(getLayoutInflater());
+        AlertDialog alertDialog = new AlertDialog.Builder(MainActivity.this).setCancelable(false).setView(privacyAgreementBinding.getRoot()).create();
+        privacyAgreementBinding.content.setText(R.string.privacyAgreement);
+        privacyAgreementBinding.sure.setOnClickListener(new View.OnClickListener() {
             @Override
-            public void onSubscribe(@NonNull Disposable d) {
-            }
-
-            @Override
-            public void onNext(@NonNull String str) {
-                ViewPrivacyAgreementBinding privacyAgreementBinding = ViewPrivacyAgreementBinding.inflate(getLayoutInflater());
-                AlertDialog alertDialog = new AlertDialog.Builder(MainActivity.this).setCancelable(false).setView(privacyAgreementBinding.getRoot()).create();
-                privacyAgreementBinding.content.setText(str);
-                privacyAgreementBinding.sure.setOnClickListener(new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        alertDialog.dismiss();
-                        showAccessibilityStatement();
-                    }
-                });
-                privacyAgreementBinding.cancel.setOnClickListener(new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        alertDialog.dismiss();
-                        finishAndRemoveTask();
-                    }
-                });
-                Window window = alertDialog.getWindow();
-                window.setBackgroundDrawableResource(R.drawable.add_data_background);
-                alertDialog.show();
-                WindowManager.LayoutParams lp = window.getAttributes();
-                DisplayMetrics metrics = new DisplayMetrics();
-                getWindowManager().getDefaultDisplay().getRealMetrics(metrics);
-                lp.width = metrics.widthPixels / 5 * 4;
-                lp.height = metrics.heightPixels / 5 * 2;
-                window.setAttributes(lp);
-            }
-
-            @Override
-            public void onError(@NonNull Throwable e) {
-                onNext(getString(R.string.privacyAgreement));
-            }
-
-            @Override
-            public void onComplete() {
+            public void onClick(View v) {
+                alertDialog.dismiss();
+                showAccessibilityStatement();
             }
         });
+        privacyAgreementBinding.cancel.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                alertDialog.dismiss();
+                finishAndRemoveTask();
+            }
+        });
+        Window window = alertDialog.getWindow();
+        window.setBackgroundDrawableResource(R.drawable.add_data_background);
+        alertDialog.show();
+        WindowManager.LayoutParams lp = window.getAttributes();
+        DisplayMetrics metrics = new DisplayMetrics();
+        getWindowManager().getDefaultDisplay().getRealMetrics(metrics);
+        lp.width = metrics.widthPixels / 5 * 4;
+        lp.height = metrics.heightPixels / 5 * 2;
+        window.setAttributes(lp);
     }
 
     private void showAccessibilityStatement() {
-        Observable<String> observable = MyApplication.myHttpRequest.getAccessibilityStatement();
-        observable.subscribeOn(Schedulers.io()).observeOn(AndroidSchedulers.mainThread()).subscribe(new Observer<String>() {
+        ViewAccessibilityStatementBinding accessibilityStatementBinding = ViewAccessibilityStatementBinding.inflate(getLayoutInflater());
+        AlertDialog alertDialog = new AlertDialog.Builder(MainActivity.this).setCancelable(false).setView(accessibilityStatementBinding.getRoot()).create();
+        accessibilityStatementBinding.content.setText(R.string.accessibilityStatement);
+        accessibilityStatementBinding.sure.setOnClickListener(new View.OnClickListener() {
             @Override
-            public void onSubscribe(@NonNull Disposable d) {
-            }
-
-            @Override
-            public void onNext(@NonNull String str) {
-                ViewAccessibilityStatementBinding accessibilityStatementBinding = ViewAccessibilityStatementBinding.inflate(getLayoutInflater());
-                AlertDialog alertDialog = new AlertDialog.Builder(MainActivity.this).setCancelable(false).setView(accessibilityStatementBinding.getRoot()).create();
-                accessibilityStatementBinding.content.setText(str);
-                accessibilityStatementBinding.sure.setOnClickListener(new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        MyUtils.setIsFirstStart(false);
-                        alertDialog.dismiss();
-                    }
-                });
-                accessibilityStatementBinding.cancel.setOnClickListener(new View.OnClickListener() {
-                    @Override
-                    public void onClick(View v) {
-                        alertDialog.dismiss();
-                        finishAndRemoveTask();
-                    }
-                });
-                Window window = alertDialog.getWindow();
-                window.setBackgroundDrawableResource(R.drawable.add_data_background);
-                alertDialog.show();
-                WindowManager.LayoutParams lp = window.getAttributes();
-                DisplayMetrics metrics = new DisplayMetrics();
-                getWindowManager().getDefaultDisplay().getRealMetrics(metrics);
-                lp.width = metrics.widthPixels / 5 * 4;
-                lp.height = metrics.heightPixels / 5 * 2;
-                window.setAttributes(lp);
-            }
-
-            @Override
-            public void onError(@NonNull Throwable e) {
-                onNext(getString(R.string.accessibilityStatement));
-            }
-
-            @Override
-            public void onComplete() {
+            public void onClick(View v) {
+                MyUtils.setIsFirstStart(false);
+                alertDialog.dismiss();
             }
         });
+        accessibilityStatementBinding.cancel.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                alertDialog.dismiss();
+                finishAndRemoveTask();
+            }
+        });
+        Window window = alertDialog.getWindow();
+        window.setBackgroundDrawableResource(R.drawable.add_data_background);
+        alertDialog.show();
+        WindowManager.LayoutParams lp = window.getAttributes();
+        DisplayMetrics metrics = new DisplayMetrics();
+        getWindowManager().getDefaultDisplay().getRealMetrics(metrics);
+        lp.width = metrics.widthPixels / 5 * 4;
+        lp.height = metrics.heightPixels / 5 * 2;
+        window.setAttributes(lp);
     }
 
     private void handleImportRule(Intent intent) {
@@ -395,28 +295,19 @@ public class MainActivity extends BaseActivity {
                 newRuleBinding.sure.setOnClickListener(new View.OnClickListener() {
                     @Override
                     public void onClick(View v) {
-                        widgetShare.widget.id = null;
-                        widgetShare.widget.createTime = System.currentTimeMillis();
-                        widgetShare.widget.lastTriggerTime = 0;
-                        widgetShare.widget.triggerCount = 0;
-                        widgetShare.widget.triggerReason = "";
-                        dataDao.insertWidget(widgetShare.widget);
-                        AppDescribe appDescribe = dataDao.getAppDescribeByPackage(widgetShare.widget.appPackage);
-                        if (appDescribe == null) {
-                            appDescribe = new AppDescribe();
-                            appDescribe.appPackage = widgetShare.widget.appPackage;
-                            appDescribe.appName = v.getTag().toString();
-                            appDescribe.id = dataDao.insertAppDescribe(appDescribe);
-                        }
-                        appDescribe.widgetOnOff = true;
-                        dataDao.updateAppDescribe(appDescribe);
-                        MyUtils.requestUpdateAppDescribe(appDescribe.appPackage);
-                        Intent intent = new Intent(context, EditDataActivity.class);
-                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                        intent.putExtra("packageName", appDescribe.appPackage);
-                        startActivity(intent);
-                        Toast.makeText(context, "导入成功", Toast.LENGTH_SHORT).show();
                         alertDialog.dismiss();
+                        String importedAppName = String.valueOf(v.getTag());
+                        MyApplication.executeDatabase(new Runnable() {
+                            @Override
+                            public void run() {
+                                try {
+                                    AppDescribe appDescribe = dataDao.importWidget(widgetShare.widget, importedAppName);
+                                    MyApplication.postToMain(() -> finishSingleRuleImport(appDescribe));
+                                } catch (RuntimeException e) {
+                                    MyApplication.postToMain(() -> Toast.makeText(context, e.getMessage(), Toast.LENGTH_LONG).show());
+                                }
+                            }
+                        });
                     }
                 });
                 newRuleBinding.cancel.setOnClickListener(new View.OnClickListener() {
@@ -466,27 +357,19 @@ public class MainActivity extends BaseActivity {
                 newRuleBinding.sure.setOnClickListener(new View.OnClickListener() {
                     @Override
                     public void onClick(View v) {
-                        coordinateShare.coordinate.id = null;
-                        coordinateShare.coordinate.createTime = System.currentTimeMillis();
-                        coordinateShare.coordinate.lastTriggerTime = 0;
-                        coordinateShare.coordinate.triggerCount = 0;
-                        dataDao.insertCoordinate(coordinateShare.coordinate);
-                        AppDescribe appDescribe = dataDao.getAppDescribeByPackage(coordinateShare.coordinate.appPackage);
-                        if (appDescribe == null) {
-                            appDescribe = new AppDescribe();
-                            appDescribe.appPackage = coordinateShare.coordinate.appPackage;
-                            appDescribe.appName = v.getTag().toString();
-                            appDescribe.id = dataDao.insertAppDescribe(appDescribe);
-                        }
-                        appDescribe.coordinateOnOff = true;
-                        dataDao.updateAppDescribe(appDescribe);
-                        MyUtils.requestUpdateAppDescribe(appDescribe.appPackage);
-                        Intent intent = new Intent(context, EditDataActivity.class);
-                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                        intent.putExtra("packageName", appDescribe.appPackage);
-                        startActivity(intent);
-                        Toast.makeText(context, "导入成功", Toast.LENGTH_SHORT).show();
                         alertDialog.dismiss();
+                        String importedAppName = String.valueOf(v.getTag());
+                        MyApplication.executeDatabase(new Runnable() {
+                            @Override
+                            public void run() {
+                                try {
+                                    AppDescribe appDescribe = dataDao.importCoordinate(coordinateShare.coordinate, importedAppName);
+                                    MyApplication.postToMain(() -> finishSingleRuleImport(appDescribe));
+                                } catch (RuntimeException e) {
+                                    MyApplication.postToMain(() -> Toast.makeText(context, e.getMessage(), Toast.LENGTH_LONG).show());
+                                }
+                            }
+                        });
                     }
                 });
                 newRuleBinding.cancel.setOnClickListener(new View.OnClickListener() {
@@ -530,10 +413,24 @@ public class MainActivity extends BaseActivity {
                     @Override
                     public void onClick(View v) {
                         alertDialog.dismiss();
-                        RegulationImportActivity.regulationList = regulationExport.regulationList;
-                        Intent intent = new Intent(MainActivity.this, RegulationImportActivity.class);
-                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                        startActivity(intent);
+                        MyApplication.executeIo(new Runnable() {
+                            @Override
+                            public void run() {
+                                try {
+                                    RegulationImportStore.write(getApplicationContext(), regulationExport.regulationList);
+                                    MyApplication.postToMain(new Runnable() {
+                                        @Override
+                                        public void run() {
+                                            Intent intent = new Intent(MainActivity.this, RegulationImportActivity.class);
+                                            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                                            startActivity(intent);
+                                        }
+                                    });
+                                } catch (Exception e) {
+                                    MyApplication.postToMain(() -> Toast.makeText(context, "暂存导入规则失败：" + e.getMessage(), Toast.LENGTH_LONG).show());
+                                }
+                            }
+                        });
                     }
                 });
                 newRuleBinding.cancel.setOnClickListener(new View.OnClickListener() {
@@ -555,6 +452,15 @@ public class MainActivity extends BaseActivity {
         } catch (RuntimeException | FileNotFoundException e) {
             Toast.makeText(context, e.getMessage(), Toast.LENGTH_SHORT).show();
         }
+    }
+
+    private void finishSingleRuleImport(AppDescribe appDescribe) {
+        MyUtils.requestUpdateAppDescribe(appDescribe.appPackage);
+        Intent intent = new Intent(context, EditDataActivity.class);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        intent.putExtra("packageName", appDescribe.appPackage);
+        startActivity(intent);
+        Toast.makeText(context, "导入成功", Toast.LENGTH_SHORT).show();
     }
 
     static class Resource {

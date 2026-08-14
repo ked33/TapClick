@@ -178,5 +178,4 @@
         </androidx.appcompat.widget.LinearLayoutCompat>
     </ScrollView>
 
-    <include layout="@layout/view_no_vip" />
 </FrameLayout>

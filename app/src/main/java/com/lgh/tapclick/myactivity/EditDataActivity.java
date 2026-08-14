@@ -46,14 +46,11 @@ import com.lgh.tapclick.mybean.MyAppConfig;
 import com.lgh.tapclick.mybean.Widget;
 import com.lgh.tapclick.mybean.WidgetShare;
 import com.lgh.tapclick.myclass.DataDao;
+import com.lgh.tapclick.myclass.ExportFileManager;
 import com.lgh.tapclick.myclass.MyApplication;
 import com.lgh.tapclick.myfunction.MyUtils;
 
-import org.apache.commons.io.FileUtils;
-
 import java.io.File;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.HashSet;
@@ -90,7 +87,12 @@ public class EditDataActivity extends BaseActivity {
 
         context = getApplicationContext();
         dataDao = MyApplication.dataDao;
-        myAppConfig = dataDao.getMyAppConfig();
+        MyApplication.queryDatabase(dataDao::getMyAppConfig, result -> {
+            myAppConfig = result;
+            if (myAppConfig.autoHideOnTaskList) {
+                MyUtils.setExcludeFromRecents(false);
+            }
+        });
         gson = new GsonBuilder().create();
         dateFormatModify = new SimpleDateFormat("HH:mm:ss", Locale.getDefault());
         dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault());
@@ -133,9 +135,6 @@ public class EditDataActivity extends BaseActivity {
             }
         });
 
-        if (myAppConfig.autoHideOnTaskList) {
-            MyUtils.setExcludeFromRecents(false);
-        }
     }
 
     @Override
@@ -146,12 +145,25 @@ public class EditDataActivity extends BaseActivity {
             packageName = extraPackage;
         }
         if (!TextUtils.isEmpty(packageName)) {
-            AppDescribe appDescribeTemp = dataDao.getAppDescribeByPackage(packageName);
-            if (appDescribeTemp != null) {
-                appDescribeTemp.getOtherFieldsFromDatabase(dataDao);
-                appDescribe = appDescribeTemp;
-            }
+            MyApplication.queryDatabase(() -> {
+                AppDescribe result = dataDao.getAppDescribeByPackage(packageName);
+                if (result != null) {
+                    result.getOtherFieldsFromDatabase(dataDao);
+                }
+                return result;
+            }, result -> {
+                if (isFinishing() || isDestroyed()) {
+                    return;
+                }
+                appDescribe = result;
+                renderAppDescribe();
+            });
+        } else {
+            finishAndRemoveTask();
         }
+    }
+
+    private void renderAppDescribe() {
         if (appDescribe == null) {
             finishAndRemoveTask();
             return;
@@ -192,7 +204,7 @@ public class EditDataActivity extends BaseActivity {
                 appDescribe.widgetOnOff = baseSettingBinding.widgetSwitch.isChecked();
                 appDescribe.widgetRetrieveTime = widgetTime.equals("∞") ? appDescribe.widgetRetrieveTime : Integer.parseInt(widgetTime);
                 appDescribe.widgetRetrieveAllTime = baseSettingBinding.widgetRetrieveAllTime.isChecked();
-                dataDao.updateAppDescribe(appDescribe);
+                MyApplication.executeDatabase(() -> dataDao.updateAppDescribe(appDescribe));
                 editDataBinding.baseSettingModify.setTextColor(0xff000000);
                 editDataBinding.baseSettingModify.setText(dateFormatModify.format(new Date()) + " (修改成功)");
             }
@@ -341,7 +353,7 @@ public class EditDataActivity extends BaseActivity {
                     coordinate.clickInterval = Integer.parseInt(sInterval);
                     coordinate.clickNumber = Integer.parseInt(sNumber);
                     coordinate.comment = StrUtil.trimToEmpty(coordinateBinding.coordinateComment.getText());
-                    dataDao.updateCoordinate(coordinate);
+                    MyApplication.executeDatabase(() -> dataDao.updateCoordinate(coordinate));
                     coordinateBinding.coordinateModify.setTextColor(0xff000000);
                     coordinateBinding.coordinateModify.setText(dateFormatModify.format(new Date()) + " (修改成功)");
                 }
@@ -403,7 +415,7 @@ public class EditDataActivity extends BaseActivity {
                             .setPositiveButton("确定", new DialogInterface.OnClickListener() {
                                 @Override
                                 public void onClick(DialogInterface dialog, int which) {
-                                    dataDao.deleteCoordinate(coordinate);
+                                    MyApplication.executeDatabase(() -> dataDao.deleteCoordinate(coordinate));
                                     appDescribe.coordinateList.remove(coordinate);
                                     editDataBinding.coordinateLayout.removeView(coordinateBinding.getRoot());
                                     if (appDescribe.coordinateList.isEmpty()) {
@@ -414,7 +426,7 @@ public class EditDataActivity extends BaseActivity {
                                             baseSettingBinding.widgetSwitch.setChecked(false);
                                             appDescribe.widgetOnOff = false;
                                         }
-                                        dataDao.updateAppDescribe(appDescribe);
+                                        MyApplication.executeDatabase(() -> dataDao.updateAppDescribe(appDescribe));
                                     }
                                 }
                             }).create().show();
@@ -521,6 +533,12 @@ public class EditDataActivity extends BaseActivity {
                     widget.widgetViewId = StrUtil.toStringOrEmpty(widgetBinding.widgetViewId.getText());
                     widget.widgetDescribe = StrUtil.toStringOrEmpty(widgetBinding.widgetDescribe.getText());
                     widget.widgetText = StrUtil.toStringOrEmpty(widgetBinding.widgetText.getText());
+                    try {
+                        widget.validatePatterns();
+                    } catch (IllegalArgumentException e) {
+                        widgetBinding.widgetModify.setText(e.getMessage());
+                        return;
+                    }
                     widget.comment = StrUtil.trimToEmpty(widgetBinding.widgetComment.getText());
                     widget.clickNumber = Integer.parseInt(clickNumber);
                     widget.clickInterval = Integer.parseInt(clickInterval);
@@ -528,7 +546,7 @@ public class EditDataActivity extends BaseActivity {
                     widget.debounceDelay = Integer.parseInt(debounceDelay);
                     widget.noRepeat = widgetBinding.widgetNoRepeat.isChecked();
                     widget.clickOnly = widgetBinding.widgetClickOnly.isChecked();
-                    dataDao.updateWidget(widget);
+                    MyApplication.executeDatabase(() -> dataDao.updateWidget(widget));
                     widgetBinding.widgetModify.setTextColor(0xff000000);
                     widgetBinding.widgetModify.setText(dateFormatModify.format(new Date()) + " (修改成功)");
                 }
@@ -622,7 +640,7 @@ public class EditDataActivity extends BaseActivity {
                             .setPositiveButton("确定", new DialogInterface.OnClickListener() {
                                 @Override
                                 public void onClick(DialogInterface dialog, int which) {
-                                    dataDao.deleteWidget(widget);
+                                    MyApplication.executeDatabase(() -> dataDao.deleteWidget(widget));
                                     appDescribe.widgetList.remove(widget);
                                     editDataBinding.widgetLayout.removeView(widgetBinding.getRoot());
                                     if (appDescribe.widgetList.isEmpty()) {
@@ -633,7 +651,7 @@ public class EditDataActivity extends BaseActivity {
                                             baseSettingBinding.coordinateSwitch.setChecked(false);
                                             appDescribe.coordinateOnOff = false;
                                         }
-                                        dataDao.updateAppDescribe(appDescribe);
+                                        MyApplication.executeDatabase(() -> dataDao.updateAppDescribe(appDescribe));
                                     }
                                 }
                             }).create().show();
@@ -646,13 +664,15 @@ public class EditDataActivity extends BaseActivity {
     @Override
     protected void onPause() {
         super.onPause();
-        MyUtils.requestUpdateAppDescribe(appDescribe.appPackage);
+        if (appDescribe != null) {
+            MyApplication.executeDatabase(() -> MyUtils.requestUpdateAppDescribe(appDescribe.appPackage));
+        }
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (myAppConfig.autoHideOnTaskList) {
+        if (myAppConfig != null && myAppConfig.autoHideOnTaskList) {
             MyUtils.setExcludeFromRecents(true);
         }
     }
@@ -676,23 +696,35 @@ public class EditDataActivity extends BaseActivity {
                 .setPositiveButton("确定", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
-                        try {
-                            FileUtils.cleanDirectory(getCacheDir());
-                            String fileName = StrUtil.trimToEmpty(binding.fileName.getText());
-                            File file = new File(getCacheDir(), (fileName.isEmpty() ? binding.fileName.getHint() : fileName) + ".txt");
-                            FileUtils.writeStringToFile(file, strRegulation, StandardCharsets.UTF_8);
-                            Intent intent = new Intent(Intent.ACTION_SEND);
-                            Uri uri = FileProvider.getUriForFile(context, BuildConfig.APPLICATION_ID + ".fileprovider", file);
-                            intent.setDataAndType(uri, getContentResolver().getType(uri));
-                            intent.putExtra(Intent.EXTRA_TEXT, strRegulation);
-                            intent.putExtra(Intent.EXTRA_STREAM, uri);
-                            intent.setClipData(new ClipData(ClipData.newUri(getContentResolver(), "regulation", uri)));
-                            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                            startActivity(Intent.createChooser(intent, "分享"));
-                        } catch (IOException ex) {
-                            Toast.makeText(context, "生成分享文件时发生错误", Toast.LENGTH_SHORT).show();
-                        }
+                        String fileName = StrUtil.trimToEmpty(binding.fileName.getText());
+                        String requestedName = (fileName.isEmpty() ? String.valueOf(binding.fileName.getHint()) : fileName) + ".txt";
+                        MyApplication.executeIo(new Runnable() {
+                            @Override
+                            public void run() {
+                                try {
+                                    File file = ExportFileManager.writeText(getApplicationContext(), requestedName, strRegulation);
+                                    MyApplication.postToMain(() -> shareRuleFile(file, strRegulation));
+                                } catch (Exception e) {
+                                    MyApplication.postToMain(() -> Toast.makeText(context,
+                                            "生成分享文件时发生错误", Toast.LENGTH_SHORT).show());
+                                }
+                            }
+                        });
                     }
                 }).create().show();
+    }
+
+    private void shareRuleFile(File file, String rule) {
+        if (isFinishing() || isDestroyed()) {
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_SEND);
+        Uri uri = FileProvider.getUriForFile(this, BuildConfig.APPLICATION_ID + ".fileprovider", file);
+        intent.setDataAndType(uri, "text/plain");
+        intent.putExtra(Intent.EXTRA_TEXT, rule);
+        intent.putExtra(Intent.EXTRA_STREAM, uri);
+        intent.setClipData(ClipData.newUri(getContentResolver(), "regulation", uri));
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        startActivity(Intent.createChooser(intent, "分享"));
     }
 }

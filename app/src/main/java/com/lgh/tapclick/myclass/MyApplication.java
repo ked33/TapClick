@@ -2,6 +2,8 @@ package com.lgh.tapclick.myclass;
 
 import android.app.Application;
 import android.content.Context;
+import android.os.Handler;
+import android.os.Looper;
 
 import androidx.annotation.NonNull;
 import androidx.room.Room;
@@ -11,25 +13,40 @@ import androidx.sqlite.db.SupportSQLiteDatabase;
 import com.lgh.tapclick.mybean.MyAppConfig;
 import com.lgh.tapclick.myfunction.MyUtils;
 
-import java.security.KeyManagementException;
-import java.security.NoSuchAlgorithmException;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import me.weishu.reflection.Reflection;
-import okhttp3.OkHttpClient;
-import retrofit2.Retrofit;
-import retrofit2.adapter.rxjava3.RxJava3CallAdapterFactory;
-import retrofit2.converter.gson.GsonConverterFactory;
-import retrofit2.converter.scalars.ScalarsConverterFactory;
 
 public class MyApplication extends Application {
+    private static final AtomicReference<Thread> DATABASE_THREAD = new AtomicReference<>();
+    private static final ExecutorService DATABASE_EXECUTOR = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "TapClick-Database");
+        thread.setPriority(Thread.NORM_PRIORITY - 1);
+        DATABASE_THREAD.set(thread);
+        return thread;
+    });
+    private static final AtomicInteger IO_THREAD_NUMBER = new AtomicInteger();
+    private static final ExecutorService IO_EXECUTOR = Executors.newFixedThreadPool(2, runnable ->
+            new Thread(runnable, "TapClick-IO-" + IO_THREAD_NUMBER.incrementAndGet()));
 
+    private static Handler mainHandler;
     public static DataDao dataDao;
-    public static MyHttpRequest myHttpRequest;
+
+    public interface DatabaseCallback<T> {
+        void onResult(T result);
+    }
 
     @Override
     protected void attachBaseContext(Context base) {
         super.attachBaseContext(base);
         Reflection.unseal(base);
+        mainHandler = new Handler(Looper.getMainLooper());
 
         if (dataDao == null) {
             Migration migration_1_2 = new Migration(1, 2) {
@@ -76,44 +93,101 @@ public class MyApplication extends Application {
                     database.execSQL("ALTER TABLE 'Widget' ADD COLUMN 'condition' INTEGER NOT NULL DEFAULT 0");
                 }
             };
-            dataDao = Room.databaseBuilder(base, MyDatabase.class, "applicationData.db")
+            DataDao roomDataDao = Room.databaseBuilder(base, MyDatabase.class, "applicationData.db")
                     .addMigrations(migration_1_2, migration_2_3, migration_3_4, migration_4_5, migration_5_6, migration_6_7)
-                    .allowMainThreadQueries()
                     .build()
                     .dataDao();
+            dataDao = new SerializedDataDao(roomDataDao);
         }
 
-        if (myHttpRequest == null) {
-            try {
-                OkHttpClient okHttpClient = new OkHttpClient.Builder()
-                        .sslSocketFactory(OkHttpUtil.getIgnoreSSLSocketFactory(), OkHttpUtil.IGNORE_SSL_TRUST_MANAGER_X509)
-                        .hostnameVerifier(OkHttpUtil.IGNORE_HOST_NAME_VERIFIER)
-                        .build();
-                Retrofit retrofit = new Retrofit.Builder()
-                        .baseUrl("https://tapclick.com")
-                        .addConverterFactory(ScalarsConverterFactory.create())
-                        .addConverterFactory(GsonConverterFactory.create())
-                        .addCallAdapterFactory(RxJava3CallAdapterFactory.create())
-                        .client(okHttpClient)
-                        .build();
-                myHttpRequest = retrofit.create(MyHttpRequest.class);
-            } catch (NoSuchAlgorithmException | KeyManagementException e) {
-                throw new RuntimeException(e);
+        Future<?> configFuture = DATABASE_EXECUTOR.submit(new Runnable() {
+            @Override
+            public void run() {
+                MyAppConfig myAppConfig = dataDao.getMyAppConfig();
+                if (myAppConfig == null) {
+                    dataDao.insertMyAppConfig(new MyAppConfig());
+                }
             }
-        }
-
-        MyAppConfig myAppConfig = dataDao.getMyAppConfig();
-        if (myAppConfig == null) {
-            myAppConfig = new MyAppConfig();
-            dataDao.insertMyAppConfig(myAppConfig);
+        });
+        try {
+            configFuture.get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("初始化应用配置时线程被中断", e);
+        } catch (ExecutionException e) {
+            throw new IllegalStateException("初始化应用数据库失败", e.getCause());
         }
 
         MyUtils.init(base);
     }
 
+    public static void executeDatabase(Runnable runnable) {
+        if (Thread.currentThread() == DATABASE_THREAD.get()) {
+            runnable.run();
+        } else {
+            DATABASE_EXECUTOR.execute(runnable);
+        }
+    }
+
+    public static <T> void queryDatabase(Callable<T> callable, DatabaseCallback<T> callback) {
+        DATABASE_EXECUTOR.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    T result = callable.call();
+                    postToMain(new Runnable() {
+                        @Override
+                        public void run() {
+                            callback.onResult(result);
+                        }
+                    });
+                } catch (Exception e) {
+                    throw new IllegalStateException("数据库任务执行失败", e);
+                }
+            }
+        });
+    }
+
+    public static void postToMain(Runnable runnable) {
+        mainHandler.post(runnable);
+    }
+
+    public static void executeIo(Runnable runnable) {
+        IO_EXECUTOR.execute(runnable);
+    }
+
+    static <T> T callDatabase(Callable<T> callable) {
+        if (Thread.currentThread() == DATABASE_THREAD.get()) {
+            return callUnchecked(callable);
+        }
+        Future<T> future = DATABASE_EXECUTOR.submit(callable);
+        try {
+            return future.get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("等待数据库任务时线程被中断", e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException) {
+                throw (RuntimeException) cause;
+            }
+            throw new IllegalStateException("数据库任务执行失败", cause);
+        }
+    }
+
+    private static <T> T callUnchecked(Callable<T> callable) {
+        try {
+            return callable.call();
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalStateException("数据库任务执行失败", e);
+        }
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();
-        MyUncaughtExceptionHandler.getInstance(this).run();
+        MyUncaughtExceptionHandler.getInstance(this).install();
     }
 }

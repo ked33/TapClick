@@ -100,5 +100,4 @@
         </RelativeLayout>
     </RelativeLayout>
 
-    <include layout="@layout/view_no_vip" />
 </FrameLayout>

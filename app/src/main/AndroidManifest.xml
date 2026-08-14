@@ -1,23 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
         android:name="com.lgh.tapclick.myclass.MyApplication"
-        android:allowBackup="true"
-        android:hasFragileUserData="true"
+        android:allowBackup="false"
         android:icon="@drawable/app"
         android:label="@string/appName"
-        android:largeHeap="true"
-        android:persistent="true"
         android:roundIcon="@drawable/app"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
@@ -54,10 +47,6 @@
         <activity android:name="com.lgh.tapclick.myactivity.SettingActivity" />
         <activity android:name="com.lgh.tapclick.myactivity.AuthorizationActivity" />
         <activity android:name="com.lgh.tapclick.myactivity.AddDataActivity" />
-        <activity
-            android:name="com.lgh.tapclick.myactivity.UpdateActivity"
-            android:theme="@style/MyDialog" />
-        <activity android:name="com.lgh.tapclick.myactivity.MoreMessageActivity" />
         <activity
             android:name="com.lgh.tapclick.myactivity.ShortCutActivity"
             android:theme="@android:style/Theme.NoDisplay" />
@@ -111,6 +100,10 @@
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/configure" />
+
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Runs the user-enabled accessibility automation service while the app is not visible" />
         </service>
 
         <provider
@@ -120,20 +113,6 @@
             android:exported="false"
             android:process=":AccessibilityService" />
 
-        <receiver
-            android:name="com.lgh.tapclick.myfunction.MyDeviceAdminReceiver"
-            android:description="@string/appName"
-            android:enabled="true"
-            android:exported="true"
-            android:permission="android.permission.BIND_DEVICE_ADMIN"
-            android:process=":AccessibilityService">
-            <meta-data
-                android:name="android.app.device_admin"
-                android:resource="@xml/configure_device_admin" />
-            <intent-filter>
-                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
-            </intent-filter>
-        </receiver>
     </application>
 
 </manifest>

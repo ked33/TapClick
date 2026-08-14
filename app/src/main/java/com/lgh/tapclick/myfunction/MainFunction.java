@@ -42,6 +42,8 @@ import android.widget.ImageView;
 import android.widget.SeekBar;
 import android.widget.TextView;
 
+import androidx.core.content.ContextCompat;
+
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.lgh.tapclick.R;
@@ -72,10 +74,11 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -98,9 +101,9 @@ public class MainFunction {
     private final PackageManager packageManager;
     private final InputMethodManager inputMethodManager;
     private final DataDao dataDao;
-    private final Map<String, AppDescribe> appDescribeMap;
-    private final ScheduledExecutorService executorServiceMain;
-    private final ScheduledExecutorService executorServiceSub;
+    private volatile Map<String, AppDescribe> appDescribeMap;
+    private final ScheduledThreadPoolExecutor executorServiceMain;
+    private final ScheduledThreadPoolExecutor executorServiceSub;
     private final Set<Widget> alreadyClickSet;
     private final Set<Widget> debounceSet;
     private final LinkedList<String> logList;
@@ -120,10 +123,12 @@ public class MainFunction {
     private volatile boolean needChangeActivity;
     private volatile ScheduledFuture<?> futureWidget;
     private volatile ScheduledFuture<?> futureCoordinate;
-    private volatile Map<String, Set<Coordinate>> coordinateSetMap;
-    private volatile Map<String, Set<Widget>> widgetSetMap;
-    private volatile Set<Coordinate> coordinateSet;
-    private volatile Set<Widget> widgetSet;
+    private volatile Map<String, List<Coordinate>> coordinateSetMap;
+    private volatile Map<String, List<Widget>> widgetSetMap;
+    private volatile List<Coordinate> coordinateSet;
+    private volatile List<Widget> widgetSet;
+    private volatile ScheduledFuture<?> pendingWidgetScan;
+    private volatile long pageGeneration;
     private volatile AccessibilityServiceInfo serviceInfo;
     private MyBroadcastReceiver myBroadcastReceiver;
     private WindowManager.LayoutParams aParams, bParams, cParams;
@@ -134,28 +139,37 @@ public class MainFunction {
     private View ignoreView;
     private WindowManager.LayoutParams dbClickLp;
     private View dbClickView;
+    private final AtomicBoolean closed;
+    private boolean receiverRegistered;
 
     public MainFunction(AccessibilityService accessibilityService) {
         service = accessibilityService;
         inputMethodManager = accessibilityService.getSystemService(InputMethodManager.class);
         windowManager = accessibilityService.getSystemService(WindowManager.class);
         packageManager = accessibilityService.getPackageManager();
-        executorServiceMain = Executors.newSingleThreadScheduledExecutor();
-        executorServiceSub = Executors.newSingleThreadScheduledExecutor();
+        executorServiceMain = new ScheduledThreadPoolExecutor(1,
+                runnable -> new Thread(runnable, "TapClick-WidgetScanner"));
+        executorServiceSub = new ScheduledThreadPoolExecutor(1,
+                runnable -> new Thread(runnable, "TapClick-Actions"));
+        executorServiceMain.setRemoveOnCancelPolicy(true);
+        executorServiceSub.setRemoveOnCancelPolicy(true);
         simpleDateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT);
         gson = new GsonBuilder().setPrettyPrinting().create();
         gsonNoPretty = new GsonBuilder().create();
         appDescribe = new AppDescribe();
-        alreadyClickSet = new HashSet<>();
-        appDescribeMap = new HashMap<>();
-        debounceSet = new HashSet<>();
+        alreadyClickSet = Collections.newSetFromMap(new ConcurrentHashMap<>());
+        appDescribeMap = Collections.emptyMap();
+        debounceSet = Collections.newSetFromMap(new ConcurrentHashMap<>());
         logList = new LinkedList<>();
+        closed = new AtomicBoolean(false);
         dataDao = MyApplication.dataDao;
         currentPackage = StrUtil.EMPTY;
         currentPackageSub = StrUtil.EMPTY;
         currentActivity = StrUtil.EMPTY;
         prePackage = StrUtil.EMPTY;
         preActivity = StrUtil.EMPTY;
+        coordinateSetMap = Collections.emptyMap();
+        widgetSetMap = Collections.emptyMap();
     }
 
     public void onServiceConnected() {
@@ -163,10 +177,9 @@ public class MainFunction {
         IntentFilter intentFilter = new IntentFilter();
         intentFilter.addAction(Intent.ACTION_SCREEN_OFF);
         myBroadcastReceiver = new MyBroadcastReceiver();
-        service.registerReceiver(myBroadcastReceiver, intentFilter);
+        ContextCompat.registerReceiver(service, myBroadcastReceiver, intentFilter, ContextCompat.RECEIVER_NOT_EXPORTED);
+        receiverRegistered = true;
         executorServiceSub.execute(this::getRunningData);
-        futureWidget = executorServiceSub.schedule(System::currentTimeMillis, 0, TimeUnit.MILLISECONDS);
-        futureCoordinate = executorServiceSub.schedule(System::currentTimeMillis, 0, TimeUnit.MILLISECONDS);
         keepAliveByNotification(MyUtils.getKeepAliveByNotification());
         keepAliveByFloatingWindow(MyUtils.getKeepAliveByFloatingWindow());
         showDbClickFloating(MyUtils.getDbClickEnable());
@@ -193,6 +206,9 @@ public class MainFunction {
 
     @SuppressLint("SwitchIntDef")
     public void onAccessibilityEvent(AccessibilityEvent event) {
+        if (closed.get()) {
+            return;
+        }
         switch (event.getEventType()) {
             case AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED: {
                 AccessibilityNodeInfo root = service.getRootInActiveWindow();
@@ -233,8 +249,10 @@ public class MainFunction {
                 if (!packageName.equals(currentPackageSub)) {
                     needChangeActivity = true;
                     currentPackageSub = packageName;
-                    futureWidget.cancel(false);
-                    futureCoordinate.cancel(false);
+                    pageGeneration++;
+                    cancelFuture(pendingWidgetScan);
+                    cancelFuture(futureWidget);
+                    cancelFuture(futureCoordinate);
                     serviceInfo.eventTypes &= ~AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED;
                     service.setServiceInfo(serviceInfo);
                     debounceSet.clear();
@@ -244,11 +262,15 @@ public class MainFunction {
                     coordinateSetMap = appDescribe.coordinateSetMap;
                     onOffWidget = appDescribe.widgetOnOff && !widgetSetMap.isEmpty();
                     onOffCoordinate = appDescribe.coordinateOnOff && !coordinateSetMap.isEmpty();
+                    long packageGeneration = pageGeneration;
 
                     if (onOffWidget && !appDescribe.widgetRetrieveAllTime) {
                         futureWidget = executorServiceSub.schedule(new Runnable() {
                             @Override
                             public void run() {
+                                if (packageGeneration != pageGeneration || closed.get()) {
+                                    return;
+                                }
                                 onOffWidget = false;
                                 onOffWidgetSub = false;
                                 serviceInfo.eventTypes &= ~AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED;
@@ -261,6 +283,9 @@ public class MainFunction {
                         futureCoordinate = executorServiceSub.schedule(new Runnable() {
                             @Override
                             public void run() {
+                                if (packageGeneration != pageGeneration || closed.get()) {
+                                    return;
+                                }
                                 onOffCoordinate = false;
                                 onOffCoordinateSub = false;
                             }
@@ -284,9 +309,13 @@ public class MainFunction {
                     service.setServiceInfo(serviceInfo);
                     needChangeActivity = false;
                     currentActivity = activityName;
+                    long generation = ++pageGeneration;
+                    cancelFuture(pendingWidgetScan);
                     alreadyClickSet.clear();
-                    coordinateSet = coordinateSetMap != null ? coordinateSetMap.get(activityName) : null;
-                    widgetSet = widgetSetMap != null ? widgetSetMap.get(activityName) : null;
+                    List<Coordinate> coordinates = coordinateSetMap != null ? coordinateSetMap.get(activityName) : null;
+                    List<Widget> widgets = widgetSetMap != null ? widgetSetMap.get(activityName) : null;
+                    coordinateSet = coordinates == null ? null : Collections.unmodifiableList(new ArrayList<>(coordinates));
+                    widgetSet = widgets == null ? null : Collections.unmodifiableList(new ArrayList<>(widgets));
                     onOffCoordinateSub = onOffCoordinate && coordinateSet != null;
                     onOffWidgetSub = onOffWidget && widgetSet != null;
 
@@ -297,24 +326,7 @@ public class MainFunction {
 
                     if (onOffCoordinateSub) {
                         for (Coordinate coordinate : coordinateSet) {
-                            executorServiceSub.scheduleWithFixedDelay(new Runnable() {
-                                private int num = 0;
-
-                                @Override
-                                public void run() {
-                                    if (onOffCoordinateSub && num++ < coordinate.clickNumber && currentActivity.equals(coordinate.appActivity)) {
-                                        click(coordinate.xPosition, coordinate.yPosition);
-                                    } else {
-                                        throw new RuntimeException();
-                                    }
-                                    if (num == 1) {
-                                        coordinate.triggerCount += 1;
-                                        coordinate.lastTriggerTime = System.currentTimeMillis();
-                                        dataDao.updateCoordinate(coordinate);
-                                        addLog("点击坐标：" + gson.toJson(coordinate));
-                                    }
-                                }
-                            }, coordinate.clickDelay, coordinate.clickInterval <= 0 ? 10 : coordinate.clickInterval, TimeUnit.MILLISECONDS);
+                            scheduleCoordinateClick(coordinate, generation, 0, coordinate.clickDelay);
                         }
                     }
                 }
@@ -324,12 +336,7 @@ public class MainFunction {
                 if (!onOffWidgetSub) {
                     break;
                 }
-                executorServiceMain.execute(new Runnable() {
-                    @Override
-                    public void run() {
-                        findAndClickView(nodeInfoList, widgetSet);
-                    }
-                });
+                scheduleWidgetScan(nodeInfoList, widgetSet, pageGeneration, 0);
                 break;
             }
             case AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED: {
@@ -343,12 +350,7 @@ public class MainFunction {
                 if (!onOffWidgetSub) {
                     break;
                 }
-                executorServiceMain.execute(new Runnable() {
-                    @Override
-                    public void run() {
-                        findAndClickView(Collections.singletonList(source), widgetSet);
-                    }
-                });
+                scheduleWidgetScan(Collections.singletonList(source), widgetSet, pageGeneration, 60);
                 break;
             }
         }
@@ -388,27 +390,61 @@ public class MainFunction {
     }
 
     public boolean onUnbind(Intent intent) {
-        service.unregisterReceiver(myBroadcastReceiver);
+        close();
         return true;
     }
 
-    /**
-     * 将数据暴露给其他组件
-     * 方便修改
-     */
-    public Map<String, AppDescribe> getAppDescribeMap() {
-        return appDescribeMap;
+    public void refreshAppDescribe(String packageName) {
+        if (TextUtils.isEmpty(packageName) || closed.get()) {
+            return;
+        }
+        executorServiceSub.execute(new Runnable() {
+            @Override
+            public void run() {
+                AppDescribe describe = dataDao.getAppDescribeByPackage(packageName);
+                Map<String, AppDescribe> snapshot = new HashMap<>(appDescribeMap);
+                if (describe == null) {
+                    snapshot.remove(packageName);
+                } else {
+                    describe.getOtherFieldsFromDatabase(dataDao);
+                    snapshot.put(packageName, describe);
+                }
+                appDescribeMap = Collections.unmodifiableMap(snapshot);
+            }
+        });
+    }
+
+    public void removeAppDescribes(List<String> packageNames) {
+        if (packageNames == null || packageNames.isEmpty() || closed.get()) {
+            return;
+        }
+        executorServiceSub.execute(new Runnable() {
+            @Override
+            public void run() {
+                Map<String, AppDescribe> snapshot = new HashMap<>(appDescribeMap);
+                for (String packageName : packageNames) {
+                    snapshot.remove(packageName);
+                }
+                appDescribeMap = Collections.unmodifiableMap(snapshot);
+            }
+        });
+    }
+
+    public void refreshAllData() {
+        if (!closed.get()) {
+            executorServiceSub.execute(this::getRunningData);
+        }
     }
 
     /**
      * 查找并点击View
      */
-    private void findAndClickView(List<AccessibilityNodeInfo> nodeInfoList, Set<Widget> widgets) {
+    private void findAndClickView(List<AccessibilityNodeInfo> nodeInfoList, List<Widget> widgets, long generation) {
         LinkedList<AccessibilityNodeInfo> list = new LinkedList<>(nodeInfoList);
-        while (!list.isEmpty() && onOffWidgetSub) {
+        while (!list.isEmpty() && onOffWidgetSub && generation == pageGeneration && !closed.get()) {
             AccessibilityNodeInfo nodeInfo = list.poll();
             if (nodeInfo != null) {
-                clickByWidget(nodeInfo, widgets);
+                clickByWidget(nodeInfo, widgets, generation);
                 for (int n = 0; n < nodeInfo.getChildCount(); n++) {
                     list.add(nodeInfo.getChild(n));
                 }
@@ -416,7 +452,7 @@ public class MainFunction {
         }
     }
 
-    private void clickByWidget(AccessibilityNodeInfo nodeInfo, Set<Widget> widgets) {
+    private void clickByWidget(AccessibilityNodeInfo nodeInfo, List<Widget> widgets, long generation) {
         Rect rect = new Rect();
         nodeInfo.getBoundsInScreen(rect);
         Long nodeId = nodeInfo.getSourceNodeId();
@@ -434,10 +470,10 @@ public class MainFunction {
                 } else if (viewId != null && !e.widgetViewId.isEmpty() && viewId.equals(e.widgetViewId)) {
                     e.triggerReason = "ViewId 匹配";
                     addLog(String.format("找到控件：ViewId[%s]", e.widgetViewId));
-                } else if (describe != null && !e.widgetDescribe.isEmpty() && describe.matches(e.widgetDescribe)) {
+                } else if (!e.widgetDescribe.isEmpty() && e.matchesDescribe(describe)) {
                     e.triggerReason = "Describe 匹配";
                     addLog(String.format("找到控件：Describe[%s]", e.widgetDescribe));
-                } else if (text != null && !e.widgetText.isEmpty() && text.matches(e.widgetText)) {
+                } else if (!e.widgetText.isEmpty() && e.matchesText(text)) {
                     e.triggerReason = "Text 匹配";
                     addLog(String.format("找到控件：Text[%s]", e.widgetText));
                 } else {
@@ -471,7 +507,7 @@ public class MainFunction {
                     }
                 }
                 if (!e.widgetDescribe.isEmpty()) {
-                    if (describe != null && describe.matches(e.widgetDescribe)) {
+                    if (e.matchesDescribe(describe)) {
                         strBuildTrigger.append(", Describe");
                         strBuildLog.append(String.format(", Describe[%s]", e.widgetDescribe));
                     } else {
@@ -479,7 +515,7 @@ public class MainFunction {
                     }
                 }
                 if (!e.widgetText.isEmpty()) {
-                    if (text != null && text.matches(e.widgetText)) {
+                    if (e.matchesText(text)) {
                         strBuildTrigger.append(", Text");
                         strBuildLog.append(String.format(", Text[%s]", e.widgetText));
                     } else {
@@ -501,7 +537,7 @@ public class MainFunction {
             if (e.action == Widget.ACTION_CLICK) {
                 if (!e.noRepeat || alreadyClickSet.add(e)) {
                     if (!debounceSet.add(e)) {
-                        return;
+                        continue;
                     }
                     executorServiceSub.schedule(new Runnable() {
                         @Override
@@ -510,42 +546,12 @@ public class MainFunction {
                         }
                     }, e.clickDelay + e.debounceDelay, TimeUnit.MILLISECONDS);
 
-                    executorServiceSub.scheduleWithFixedDelay(new Runnable() {
-                        private int clickNumber = 0;
-
-                        @Override
-                        public void run() {
-                            if (!onOffWidgetSub
-                                    || !currentActivity.equals(e.appActivity)
-                                    || !nodeInfo.refresh()) {
-                                throw new RuntimeException();
-                            }
-                            if (clickNumber++ >= e.clickNumber) {
-                                throw new RuntimeException();
-                            }
-                            int centerX = rect.centerX();
-                            int centerY = rect.centerY();
-                            if (e.clickOnly) {
-                                click(centerX, centerY);
-                            } else if (!nodeInfo.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                                click(centerX, centerY);
-                            }
-                            if (clickNumber == 1) {
-                                e.triggerCount += 1;
-                                e.lastTriggerTime = System.currentTimeMillis();
-                                dataDao.updateWidget(e);
-                                addLog("点击控件：" + gson.toJson(e));
-                                if (alreadyClickSet.size() >= widgets.size()) {
-                                    serviceInfo.eventTypes &= ~AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED;
-                                    service.setServiceInfo(serviceInfo);
-                                }
-                            }
-                        }
-                    }, e.clickDelay, e.clickInterval <= 0 ? 10 : e.clickInterval, TimeUnit.MILLISECONDS);
+                    scheduleWidgetClick(nodeInfo, rect, e, widgets, generation, 0, e.clickDelay);
                 }
             } else if (e.action == Widget.ACTION_BACK) {
                 if (alreadyClickSet.add(e)) {
-                    if (onOffWidgetSub
+                    if (generation == pageGeneration
+                            && onOffWidgetSub
                             && currentActivity.equals(e.appActivity)
                             && nodeInfo.refresh()) {
                         service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
@@ -562,6 +568,87 @@ public class MainFunction {
             }
             break;
         }
+    }
+
+    private void scheduleWidgetScan(List<AccessibilityNodeInfo> nodeInfoList, List<Widget> widgets, long generation, long delayMillis) {
+        if (widgets == null || widgets.isEmpty() || nodeInfoList == null || nodeInfoList.isEmpty() || closed.get()) {
+            return;
+        }
+        cancelFuture(pendingWidgetScan);
+        List<AccessibilityNodeInfo> nodesSnapshot = new ArrayList<>(nodeInfoList);
+        List<Widget> widgetsSnapshot = new ArrayList<>(widgets);
+        pendingWidgetScan = executorServiceMain.schedule(new Runnable() {
+            @Override
+            public void run() {
+                if (generation == pageGeneration && onOffWidgetSub && !closed.get()) {
+                    findAndClickView(nodesSnapshot, widgetsSnapshot, generation);
+                }
+            }
+        }, delayMillis, TimeUnit.MILLISECONDS);
+    }
+
+    private void scheduleCoordinateClick(Coordinate coordinate, long generation, int clickIndex, long delayMillis) {
+        if (clickIndex >= coordinate.clickNumber || closed.get()) {
+            return;
+        }
+        executorServiceSub.schedule(new Runnable() {
+            @Override
+            public void run() {
+                if (generation != pageGeneration
+                        || !onOffCoordinateSub
+                        || !currentActivity.equals(coordinate.appActivity)
+                        || closed.get()) {
+                    return;
+                }
+                click(coordinate.xPosition, coordinate.yPosition);
+                if (clickIndex == 0) {
+                    coordinate.triggerCount += 1;
+                    coordinate.lastTriggerTime = System.currentTimeMillis();
+                    dataDao.updateCoordinate(coordinate);
+                    addLog("点击坐标：" + gson.toJson(coordinate));
+                }
+                scheduleCoordinateClick(coordinate, generation, clickIndex + 1,
+                        coordinate.clickInterval <= 0 ? 10 : coordinate.clickInterval);
+            }
+        }, Math.max(0, delayMillis), TimeUnit.MILLISECONDS);
+    }
+
+    private void scheduleWidgetClick(AccessibilityNodeInfo nodeInfo, Rect rect, Widget widget,
+                                     List<Widget> widgets, long generation, int clickIndex, long delayMillis) {
+        if (clickIndex >= widget.clickNumber || closed.get()) {
+            return;
+        }
+        executorServiceSub.schedule(new Runnable() {
+            @Override
+            public void run() {
+                if (generation != pageGeneration
+                        || !onOffWidgetSub
+                        || !currentActivity.equals(widget.appActivity)
+                        || !nodeInfo.refresh()
+                        || closed.get()) {
+                    return;
+                }
+                int centerX = rect.centerX();
+                int centerY = rect.centerY();
+                if (widget.clickOnly) {
+                    click(centerX, centerY);
+                } else if (!nodeInfo.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                    click(centerX, centerY);
+                }
+                if (clickIndex == 0) {
+                    widget.triggerCount += 1;
+                    widget.lastTriggerTime = System.currentTimeMillis();
+                    dataDao.updateWidget(widget);
+                    addLog("点击控件：" + gson.toJson(widget));
+                    if (alreadyClickSet.size() >= widgets.size()) {
+                        serviceInfo.eventTypes &= ~AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED;
+                        service.setServiceInfo(serviceInfo);
+                    }
+                }
+                scheduleWidgetClick(nodeInfo, rect, widget, widgets, generation, clickIndex + 1,
+                        widget.clickInterval <= 0 ? 10 : widget.clickInterval);
+            }
+        }, Math.max(0, delayMillis), TimeUnit.MILLISECONDS);
     }
 
     /**
@@ -607,10 +694,12 @@ public class MainFunction {
      */
     private void getRunningData() {
         List<AppDescribe> appDescribeList = dataDao.getAllAppDescribes();
+        Map<String, AppDescribe> snapshot = new HashMap<>();
         for (AppDescribe describe : appDescribeList) {
             describe.getOtherFieldsFromDatabase(dataDao);
-            appDescribeMap.put(describe.appPackage, describe);
+            snapshot.put(describe.appPackage, describe);
         }
+        appDescribeMap = Collections.unmodifiableMap(snapshot);
     }
 
     /**
@@ -618,6 +707,9 @@ public class MainFunction {
      */
     @SuppressLint("ClickableViewAccessibility")
     public void showAddDataWindow(boolean capture) {
+        if (closed.get()) {
+            return;
+        }
         if (pkgSuggestNotOnList == null) {
             Set<String> pkgSysSet = packageManager
                     .getInstalledPackages(PackageManager.MATCH_SYSTEM_ONLY)
@@ -1027,8 +1119,11 @@ public class MainFunction {
                                 temWidget.widgetRect = Boolean.TRUE.equals(propsMap.get("Bonus")) ? temWidget.widgetRect : null;
                                 temWidget.widgetNodeId = Boolean.TRUE.equals(propsMap.get("NodeId")) ? temWidget.widgetNodeId : null;
                                 temWidget.widgetViewId = Boolean.TRUE.equals(propsMap.get("ViewId")) ? temWidget.widgetViewId : "";
-                                temWidget.widgetDescribe = Boolean.TRUE.equals(propsMap.get("Describe")) ? temWidget.widgetDescribe : "";
-                                temWidget.widgetText = Boolean.TRUE.equals(propsMap.get("Text")) ? temWidget.widgetText : "";
+                                temWidget.widgetDescribe = Boolean.TRUE.equals(propsMap.get("Describe"))
+                                        ? Pattern.quote(temWidget.widgetDescribe) : "";
+                                temWidget.widgetText = Boolean.TRUE.equals(propsMap.get("Text"))
+                                        ? Pattern.quote(temWidget.widgetText) : "";
+                                temWidget.validatePatterns();
                                 dataDao.insertWidget(temWidget);
                                 addDataBinding.saveWid.setEnabled(false);
                                 addDataBinding.pkgName.setText(widgetSelect.appPackage + " (以下控件数据已保存)");
@@ -1156,6 +1251,9 @@ public class MainFunction {
     }
 
     public void keepAliveByNotification(boolean enable) {
+        if (closed.get()) {
+            return;
+        }
         if (enable) {
             NotificationManager notificationManager = service.getSystemService(NotificationManager.class);
             Intent intent = new Intent(service, MainActivity.class);
@@ -1167,8 +1265,10 @@ public class MainFunction {
             builder.setContentText("运行中");
             builder.setContentIntent(PendingIntent.getActivity(service, 0x01, intent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT));
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                builder.setChannelId(service.getPackageName());
-                NotificationChannel channel = new NotificationChannel(service.getPackageName(), service.getString(R.string.appName), NotificationManager.IMPORTANCE_HIGH);
+                String channelId = service.getPackageName() + ".foreground";
+                builder.setChannelId(channelId);
+                NotificationChannel channel = new NotificationChannel(
+                        channelId, service.getString(R.string.appName) + "运行状态", NotificationManager.IMPORTANCE_LOW);
                 notificationManager.createNotificationChannel(channel);
             }
             service.startForeground(0x01, builder.build());
@@ -1178,6 +1278,9 @@ public class MainFunction {
     }
 
     public void keepAliveByFloatingWindow(boolean enable) {
+        if (closed.get()) {
+            return;
+        }
         if (enable && ignoreView == null) {
             WindowManager.LayoutParams lp = new WindowManager.LayoutParams();
             lp.flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
@@ -1202,6 +1305,9 @@ public class MainFunction {
     }
 
     public void showDbClickFloating(boolean enable) {
+        if (closed.get()) {
+            return;
+        }
         if (enable && dbClickView == null) {
             dbClickLp = new WindowManager.LayoutParams();
             dbClickLp.flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
@@ -1241,6 +1347,9 @@ public class MainFunction {
     }
 
     public void showDbClickSetting() {
+        if (closed.get()) {
+            return;
+        }
         if (dbClickView == null || dbClickLp == null) {
             return;
         }
@@ -1311,14 +1420,16 @@ public class MainFunction {
         windowManager.updateViewLayout(dbClickView, dbClickLp);
     }
 
-    private void addLog(String log) {
-        logList.add(simpleDateFormat.format(new Date()) + " " + log);
-        if (logList.size() > 1000) {
-            logList.poll();
+    private synchronized void addLog(String log) {
+        if (!closed.get()) {
+            logList.add(simpleDateFormat.format(new Date()) + " " + log);
+            if (logList.size() > 1000) {
+                logList.poll();
+            }
         }
     }
 
-    public String getLog() {
+    public synchronized String getLog() {
         StringBuilder stringBuilder = new StringBuilder();
         for (String s : logList) {
             stringBuilder.append(s).append("\n");
@@ -1326,10 +1437,61 @@ public class MainFunction {
         return stringBuilder.toString();
     }
 
+    public void close() {
+        if (!closed.compareAndSet(false, true)) {
+            return;
+        }
+        pageGeneration++;
+        cancelFuture(pendingWidgetScan);
+        cancelFuture(futureWidget);
+        cancelFuture(futureCoordinate);
+        executorServiceMain.shutdownNow();
+        executorServiceSub.shutdownNow();
+        if (receiverRegistered && myBroadcastReceiver != null) {
+            try {
+                service.unregisterReceiver(myBroadcastReceiver);
+            } catch (IllegalArgumentException ignored) {
+            }
+            receiverRegistered = false;
+        }
+        service.stopForeground(true);
+        removeViewSafely(widgetSelectBinding == null ? null : widgetSelectBinding.getRoot());
+        removeViewSafely(addDataBinding == null ? null : addDataBinding.getRoot());
+        removeViewSafely(viewClickPosition);
+        removeViewSafely(ignoreView);
+        removeViewSafely(dbClickView);
+        widgetSelectBinding = null;
+        addDataBinding = null;
+        viewClickPosition = null;
+        ignoreView = null;
+        dbClickView = null;
+        alreadyClickSet.clear();
+        debounceSet.clear();
+        appDescribeMap = Collections.emptyMap();
+    }
+
+    private void removeViewSafely(View view) {
+        if (view == null || !view.isAttachedToWindow()) {
+            return;
+        }
+        try {
+            windowManager.removeViewImmediate(view);
+        } catch (IllegalArgumentException ignored) {
+        }
+    }
+
+    private static void cancelFuture(ScheduledFuture<?> future) {
+        if (future != null) {
+            future.cancel(false);
+        }
+    }
+
     public class MyBroadcastReceiver extends BroadcastReceiver {
         @Override
         public void onReceive(Context context, Intent intent) {
             if (TextUtils.equals(intent.getAction(), Intent.ACTION_SCREEN_OFF)) {
+                pageGeneration++;
+                cancelFuture(pendingWidgetScan);
                 currentPackageSub = StrUtil.EMPTY;
                 currentActivity = StrUtil.EMPTY;
             }

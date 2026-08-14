@@ -4,9 +4,7 @@ import androidx.room.Entity;
 import androidx.room.Index;
 import androidx.room.PrimaryKey;
 
-import java.util.Objects;
-
-@Entity(indices = @Index(value = {"id"}, unique = true))
+@Entity(indices = @Index(value = {"appPackage"}))
 public class Coordinate {
     @PrimaryKey(autoGenerate = true)
     public Long id;
@@ -48,21 +46,6 @@ public class Coordinate {
         this.comment = coordinate.comment;
         this.lastTriggerTime = coordinate.lastTriggerTime;
         this.triggerCount = coordinate.triggerCount;
-    }
-
-    @Override
-    public boolean equals(Object obj) {
-        if (obj == null) return false;
-        if (this == obj) return true;
-        if (!(obj instanceof Coordinate)) return false;
-        Coordinate coordinate = (Coordinate) obj;
-        return Objects.equals(this.appPackage, coordinate.appPackage)
-                && Objects.equals(this.appActivity, coordinate.appActivity);
-    }
-
-    @Override
-    public int hashCode() {
-        return Objects.hash(this.appPackage, this.appActivity);
     }
 
     @Override

@@ -40,5 +40,4 @@
 
     </androidx.appcompat.widget.LinearLayoutCompat>
 
-    <include layout="@layout/view_no_vip" />
 </FrameLayout>

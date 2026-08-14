@@ -130,5 +130,4 @@
             android:layout_gravity="center" />
     </RelativeLayout>
 
-    <include layout="@layout/view_no_vip" />
 </FrameLayout>

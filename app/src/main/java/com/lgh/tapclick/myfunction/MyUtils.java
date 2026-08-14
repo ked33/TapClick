@@ -7,6 +7,7 @@ import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.graphics.Rect;
 import android.net.Uri;
+import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.view.WindowManager;
 
@@ -63,7 +64,7 @@ public class MyUtils {
         try {
             ContentValues contentValues = new ContentValues();
             contentValues.put("updateScope", "removeAppDescribe");
-            contentValues.put("packageName", String.join(",", packages));
+            contentValues.put("packageName", TextUtils.join(",", packages));
             int re = mContext.getContentResolver().update(Uri.parse(contentProviderAuthority), contentValues, null, null);
             return re > 0;
         } catch (NullPointerException e) {
@@ -99,23 +100,23 @@ public class MyUtils {
     }
 
     public static boolean getKeepAliveByNotification() {
-        SharedPreferences preferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE | Context.MODE_MULTI_PROCESS);
+        SharedPreferences preferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE);
         return preferences.getBoolean("keepAliveByNotification", false);
     }
 
     public static boolean setKeepAliveByNotification(boolean enable) {
-        SharedPreferences preferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE | Context.MODE_MULTI_PROCESS);
+        SharedPreferences preferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE);
         preferences.edit().putBoolean("keepAliveByNotification", enable).apply();
         return true;
     }
 
     public static boolean getKeepAliveByFloatingWindow() {
-        SharedPreferences preferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE | Context.MODE_MULTI_PROCESS);
+        SharedPreferences preferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE);
         return preferences.getBoolean("keepAliveByFloatingWindow", false);
     }
 
     public static boolean setKeepAliveByFloatingWindow(boolean enable) {
-        SharedPreferences preferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE | Context.MODE_MULTI_PROCESS);
+        SharedPreferences preferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE);
         preferences.edit().putBoolean("keepAliveByFloatingWindow", enable).apply();
         return true;
     }
@@ -158,18 +159,18 @@ public class MyUtils {
     }
 
     public static boolean getDbClickEnable() {
-        SharedPreferences preferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE | Context.MODE_MULTI_PROCESS);
+        SharedPreferences preferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE);
         return preferences.getBoolean("dbClickEnable", false);
     }
 
     public static boolean setDbClickEnable(boolean enable) {
-        SharedPreferences preferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE | Context.MODE_MULTI_PROCESS);
+        SharedPreferences preferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE);
         preferences.edit().putBoolean("dbClickEnable", enable).apply();
         return true;
     }
 
     public static Rect getDbClickPosition() {
-        SharedPreferences sharedPreferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE | Context.MODE_MULTI_PROCESS);
+        SharedPreferences sharedPreferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE);
         DisplayMetrics displayMetrics = new DisplayMetrics();
         mContext.getSystemService(WindowManager.class).getDefaultDisplay().getRealMetrics(displayMetrics);
         float left = sharedPreferences.getFloat("dbClickLeftPercent", (displayMetrics.widthPixels - 150f) / displayMetrics.widthPixels);
@@ -185,23 +186,25 @@ public class MyUtils {
     }
 
     public static boolean setDbClickPosition(Rect rect) {
-        SharedPreferences sharedPreferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE | Context.MODE_MULTI_PROCESS);
+        SharedPreferences sharedPreferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE);
         DisplayMetrics displayMetrics = new DisplayMetrics();
         mContext.getSystemService(WindowManager.class).getDefaultDisplay().getRealMetrics(displayMetrics);
-        sharedPreferences.edit().putFloat("dbClickLeftPercent", (float) rect.left / displayMetrics.widthPixels).apply();
-        sharedPreferences.edit().putFloat("dbClickTopPercent", (float) rect.top / displayMetrics.heightPixels).apply();
-        sharedPreferences.edit().putFloat("dbClickRightPercent", (float) rect.right / displayMetrics.widthPixels).apply();
-        sharedPreferences.edit().putFloat("dbClickBottomPercent", (float) rect.bottom / displayMetrics.heightPixels).apply();
+        sharedPreferences.edit()
+                .putFloat("dbClickLeftPercent", (float) rect.left / displayMetrics.widthPixels)
+                .putFloat("dbClickTopPercent", (float) rect.top / displayMetrics.heightPixels)
+                .putFloat("dbClickRightPercent", (float) rect.right / displayMetrics.widthPixels)
+                .putFloat("dbClickBottomPercent", (float) rect.bottom / displayMetrics.heightPixels)
+                .apply();
         return true;
     }
 
     public static boolean getIsFirstStart() {
-        SharedPreferences sharedPreferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE | Context.MODE_MULTI_PROCESS);
+        SharedPreferences sharedPreferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE);
         return sharedPreferences.getBoolean("isFirstStart", true);
     }
 
     public static void setIsFirstStart(boolean isFirstStart) {
-        SharedPreferences sharedPreferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE | Context.MODE_MULTI_PROCESS);
+        SharedPreferences sharedPreferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE);
         sharedPreferences.edit().putBoolean("isFirstStart", isFirstStart).apply();
     }
 

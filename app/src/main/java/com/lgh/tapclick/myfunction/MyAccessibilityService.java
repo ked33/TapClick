@@ -9,7 +9,7 @@ import android.view.accessibility.AccessibilityEvent;
 public class MyAccessibilityService extends AccessibilityService {
 
     @SuppressLint("StaticFieldLeak")
-    public static MainFunction mainFunction;
+    public static volatile MainFunction mainFunction;
 
     @Override
     public void onCreate() {
@@ -50,6 +50,9 @@ public class MyAccessibilityService extends AccessibilityService {
 
     @Override
     public void onDestroy() {
+        if (mainFunction != null) {
+            mainFunction.close();
+        }
         super.onDestroy();
         mainFunction = null;
     }

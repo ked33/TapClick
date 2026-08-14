@@ -43,19 +43,14 @@ import com.lgh.tapclick.databinding.ViewEditFileNameBinding;
 import com.lgh.tapclick.databinding.ViewItemAppBinding;
 import com.lgh.tapclick.databinding.ViewOnOffWarningBinding;
 import com.lgh.tapclick.mybean.AppDescribe;
-import com.lgh.tapclick.mybean.Coordinate;
 import com.lgh.tapclick.mybean.Regulation;
 import com.lgh.tapclick.mybean.RegulationExport;
-import com.lgh.tapclick.mybean.Widget;
 import com.lgh.tapclick.myclass.DataDao;
+import com.lgh.tapclick.myclass.ExportFileManager;
 import com.lgh.tapclick.myclass.MyApplication;
 import com.lgh.tapclick.myfunction.MyUtils;
 
-import org.apache.commons.io.FileUtils;
-
 import java.io.File;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.text.Collator;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -67,14 +62,6 @@ import java.util.stream.Collectors;
 
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.crypto.digest.DigestUtil;
-import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers;
-import io.reactivex.rxjava3.annotations.NonNull;
-import io.reactivex.rxjava3.core.Observable;
-import io.reactivex.rxjava3.core.ObservableEmitter;
-import io.reactivex.rxjava3.core.ObservableOnSubscribe;
-import io.reactivex.rxjava3.core.Observer;
-import io.reactivex.rxjava3.disposables.Disposable;
-import io.reactivex.rxjava3.schedulers.Schedulers;
 
 public class ListDataActivity extends BaseActivity {
 
@@ -112,13 +99,24 @@ public class ListDataActivity extends BaseActivity {
                     return;
                 }
                 String packageName = result.getData().getStringExtra("packageName");
-                AppDescribe appDescribe = dataDao.getAppDescribeByPackage(packageName);
-                if (appDescribe != null) {
-                    appDescribe.getOtherFieldsFromDatabase(dataDao);
-                    curAppDescribeItem.appDescribe.copy(appDescribe);
-                    curAppDescribeItem.refreshExistLongNoTrigger();
-                    myAdapter.notifyItemChanged(appDescribeItemFilterList.indexOf(curAppDescribeItem));
-                }
+                AppDescribeItem itemToRefresh = curAppDescribeItem;
+                MyApplication.queryDatabase(() -> {
+                    AppDescribe appDescribe = dataDao.getAppDescribeByPackage(packageName);
+                    if (appDescribe != null) {
+                        appDescribe.getOtherFieldsFromDatabase(dataDao);
+                    }
+                    return appDescribe;
+                }, appDescribe -> {
+                    if (appDescribe == null || isFinishing() || isDestroyed()) {
+                        return;
+                    }
+                    itemToRefresh.appDescribe.copy(appDescribe);
+                    itemToRefresh.refreshExistLongNoTrigger();
+                    int position = appDescribeItemFilterList.indexOf(itemToRefresh);
+                    if (position >= 0) {
+                        myAdapter.notifyItemChanged(position);
+                    }
+                });
             }
         });
 
@@ -299,26 +297,29 @@ public class ListDataActivity extends BaseActivity {
                                 List<AppDescribe> appDescribeSelectedList = appDescribeItemSelectedSet.stream()
                                         .map(e -> e.appDescribe)
                                         .collect(Collectors.toList());
-                                List<Coordinate> coordinateList = appDescribeSelectedList.stream().
-                                        flatMap(e -> e.coordinateList.stream())
-                                        .collect(Collectors.toList());
-                                List<Widget> widgetList = appDescribeSelectedList.stream()
-                                        .flatMap(e -> e.widgetList.stream())
-                                        .collect(Collectors.toList());
                                 List<String> packages = appDescribeSelectedList.stream()
                                         .map(e -> e.appPackage)
                                         .collect(Collectors.toList());
-                                dataDao.deleteAppDescribes(appDescribeSelectedList);
-                                dataDao.deleteCoordinates(coordinateList);
-                                dataDao.deleteWidgets(widgetList);
-                                appDescribeList.removeAll(appDescribeSelectedList);
-                                appDescribeItemList.removeAll(appDescribeItemSelectedSet);
-                                appDescribeItemFilterList.removeAll(appDescribeItemSelectedSet);
-                                appDescribeItemSelectedSet.clear();
-                                MyUtils.requestRemoveAppDescribes(packages);
-                                listDataBinding.cbSelectAll.setChecked(false);
-                                listDataBinding.tvSelectedNum.setText(String.format(Locale.ROOT, "已选%s项", 0));
-                                myAdapter.notifyDataSetChanged();
+                                Set<AppDescribeItem> selectedItems = new HashSet<>(appDescribeItemSelectedSet);
+                                MyApplication.executeDatabase(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        dataDao.deleteRegulations(appDescribeSelectedList);
+                                        MyApplication.postToMain(new Runnable() {
+                                            @Override
+                                            public void run() {
+                                                appDescribeList.removeAll(appDescribeSelectedList);
+                                                appDescribeItemList.removeAll(selectedItems);
+                                                appDescribeItemFilterList.removeAll(selectedItems);
+                                                appDescribeItemSelectedSet.clear();
+                                                MyUtils.requestRemoveAppDescribes(packages);
+                                                listDataBinding.cbSelectAll.setChecked(false);
+                                                listDataBinding.tvSelectedNum.setText(String.format(Locale.ROOT, "已选%d项", 0));
+                                                myAdapter.notifyDataSetChanged();
+                                            }
+                                        });
+                                    }
+                                });
                             }
                         }).show();
             }
@@ -359,70 +360,82 @@ public class ListDataActivity extends BaseActivity {
             }
         });
 
-        Observable.create(new ObservableOnSubscribe<Boolean>() {
+        loadAppDescribeItems();
+    }
+
+    private void loadAppDescribeItems() {
+        listDataBinding.recyclerView.setVisibility(View.INVISIBLE);
+        listDataBinding.searchBox.setVisibility(View.INVISIBLE);
+        listDataBinding.progress.setVisibility(View.VISIBLE);
+        MyApplication.executeDatabase(new Runnable() {
             @Override
-            public void subscribe(@NonNull ObservableEmitter<Boolean> emitter) {
-                appDescribeList.addAll(dataDao.getAllAppDescribes());
-                appDescribeList.sort(new Comparator<AppDescribe>() {
-                    @Override
-                    public int compare(AppDescribe o1, AppDescribe o2) {
-                        return Collator.getInstance(Locale.CHINESE).compare(o1.appName, o2.appName);
-                    }
-                });
-                List<AppDescribeItem> onList = new ArrayList<>();
-                List<AppDescribeItem> offList = new ArrayList<>();
-                Drawable uninstalledIcon = ResourcesCompat.getDrawable(getResources(), R.drawable.app_uninstalled, null);
-                for (AppDescribe appDescribe : appDescribeList) {
-                    appDescribe.getOtherFieldsFromDatabase(dataDao);
-                    AppDescribeItem appDescribeItem = new AppDescribeItem(appDescribe, uninstalledIcon, false, false);
-                    try {
-                        PackageInfo packageInfo = packageManager.getPackageInfo(appDescribe.appPackage, PackageManager.GET_META_DATA);
-                        String label = packageInfo.applicationInfo.loadLabel(packageManager).toString();
-                        appDescribeItem.appIcon = packageInfo.applicationInfo.loadIcon(packageManager);
-                        appDescribeItem.isSysApp = (packageInfo.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) == ApplicationInfo.FLAG_SYSTEM;
-                        appDescribeItem.isInstalled = true;
-                        if (!TextUtils.equals(appDescribe.appName, label)) {
-                            appDescribe.appName = label;
-                            dataDao.updateAppDescribe(appDescribe);
+            public void run() {
+                try {
+                    List<AppDescribe> describes = new ArrayList<>(dataDao.getAllAppDescribes());
+                    describes.sort(new Comparator<AppDescribe>() {
+                        @Override
+                        public int compare(AppDescribe o1, AppDescribe o2) {
+                            return Collator.getInstance(Locale.CHINESE).compare(o1.appName, o2.appName);
                         }
-                    } catch (PackageManager.NameNotFoundException e) {
-                        // e.printStackTrace();
+                    });
+                    List<AppDescribeItem> onList = new ArrayList<>();
+                    List<AppDescribeItem> offList = new ArrayList<>();
+                    Drawable uninstalledIcon = ResourcesCompat.getDrawable(getResources(), R.drawable.app_uninstalled, null);
+                    for (AppDescribe appDescribe : describes) {
+                        appDescribe.getOtherFieldsFromDatabase(dataDao);
+                        AppDescribeItem item = new AppDescribeItem(appDescribe, uninstalledIcon, false, false);
+                        try {
+                            PackageInfo packageInfo = packageManager.getPackageInfo(appDescribe.appPackage, PackageManager.GET_META_DATA);
+                            String label = packageInfo.applicationInfo.loadLabel(packageManager).toString();
+                            item.appIcon = packageInfo.applicationInfo.loadIcon(packageManager);
+                            item.isSysApp = (packageInfo.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) == ApplicationInfo.FLAG_SYSTEM;
+                            item.isInstalled = true;
+                            if (!TextUtils.equals(appDescribe.appName, label)) {
+                                appDescribe.appName = label;
+                                dataDao.updateAppDescribe(appDescribe);
+                            }
+                        } catch (PackageManager.NameNotFoundException ignored) {
+                        }
+                        if (appDescribe.coordinateOnOff || appDescribe.widgetOnOff) {
+                            onList.add(item);
+                        } else {
+                            offList.add(item);
+                        }
                     }
-                    boolean b = appDescribe.coordinateOnOff || appDescribe.widgetOnOff ? onList.add(appDescribeItem) : offList.add(appDescribeItem);
+                    List<AppDescribeItem> items = new ArrayList<>(onList);
+                    items.addAll(offList);
+                    MyApplication.postToMain(() -> showLoadedItems(describes, items));
+                } catch (RuntimeException e) {
+                    MyApplication.postToMain(() -> showLoadError(e));
                 }
-                appDescribeItemList.addAll(onList);
-                appDescribeItemList.addAll(offList);
-                appDescribeItemFilterList.addAll(appDescribeItemList);
-                emitter.onComplete();
-            }
-        }).subscribeOn(Schedulers.computation()).observeOn(AndroidSchedulers.mainThread()).subscribe(new Observer<Boolean>() {
-            @Override
-            public void onSubscribe(@NonNull Disposable d) {
-                listDataBinding.recyclerView.setVisibility(View.INVISIBLE);
-                listDataBinding.searchBox.setVisibility(View.INVISIBLE);
-                listDataBinding.progress.setVisibility(View.VISIBLE);
-            }
-
-            @Override
-            public void onNext(@NonNull Boolean aBoolean) {
-            }
-
-            @Override
-            public void onError(@NonNull Throwable e) {
-                Toast.makeText(context, "出现错误", Toast.LENGTH_SHORT).show();
-                listDataBinding.recyclerView.setVisibility(View.VISIBLE);
-                listDataBinding.searchBox.setVisibility(View.VISIBLE);
-                listDataBinding.progress.setVisibility(View.INVISIBLE);
-            }
-
-            @Override
-            public void onComplete() {
-                myAdapter.notifyDataSetChanged();
-                listDataBinding.recyclerView.setVisibility(View.VISIBLE);
-                listDataBinding.searchBox.setVisibility(View.VISIBLE);
-                listDataBinding.progress.setVisibility(View.INVISIBLE);
             }
         });
+    }
+
+    private void showLoadedItems(List<AppDescribe> describes, List<AppDescribeItem> items) {
+        if (isFinishing() || isDestroyed()) {
+            return;
+        }
+        appDescribeList.clear();
+        appDescribeList.addAll(describes);
+        appDescribeItemList.clear();
+        appDescribeItemList.addAll(items);
+        appDescribeItemFilterList.clear();
+        appDescribeItemFilterList.addAll(items);
+        myAdapter.notifyDataSetChanged();
+        listDataBinding.recyclerView.setVisibility(View.VISIBLE);
+        listDataBinding.searchBox.setVisibility(View.VISIBLE);
+        listDataBinding.progress.setVisibility(View.INVISIBLE);
+    }
+
+    private void showLoadError(RuntimeException error) {
+        if (isFinishing() || isDestroyed()) {
+            return;
+        }
+        Toast.makeText(context, "读取规则失败：" + error.getMessage(), Toast.LENGTH_LONG).show();
+        listDataBinding.recyclerView.setVisibility(View.VISIBLE);
+        listDataBinding.searchBox.setVisibility(View.VISIBLE);
+        listDataBinding.progress.setVisibility(View.INVISIBLE);
     }
 
     @Override
@@ -449,23 +462,35 @@ public class ListDataActivity extends BaseActivity {
                 .setPositiveButton("确定", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
-                        try {
-                            FileUtils.cleanDirectory(getCacheDir());
-                            String fileName = binding.fileName.getText().toString();
-                            File file = new File(getCacheDir(), (fileName.isEmpty() ? binding.fileName.getHint() : fileName) + ".txt");
-                            FileUtils.writeStringToFile(file, strRegulation, StandardCharsets.UTF_8);
-                            Intent intent = new Intent(Intent.ACTION_SEND);
-                            Uri uri = FileProvider.getUriForFile(context, BuildConfig.APPLICATION_ID + ".fileprovider", file);
-                            intent.setDataAndType(uri, getContentResolver().getType(uri));
-                            intent.putExtra(Intent.EXTRA_STREAM, uri);
-                            intent.setClipData(new ClipData(ClipData.newUri(getContentResolver(), "regulation", uri)));
-                            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                            startActivity(Intent.createChooser(intent, "保存"));
-                        } catch (IOException ex) {
-                            Toast.makeText(context, "生成规则文件时发生错误", Toast.LENGTH_SHORT).show();
-                        }
+                        String fileName = binding.fileName.getText().toString().trim();
+                        String requestedName = (fileName.isEmpty() ? String.valueOf(binding.fileName.getHint()) : fileName) + ".txt";
+                        MyApplication.executeIo(new Runnable() {
+                            @Override
+                            public void run() {
+                                try {
+                                    File file = ExportFileManager.writeText(getApplicationContext(), requestedName, strRegulation);
+                                    MyApplication.postToMain(() -> shareRegulationFile(file));
+                                } catch (Exception e) {
+                                    MyApplication.postToMain(() -> Toast.makeText(context,
+                                            "生成规则文件时发生错误", Toast.LENGTH_SHORT).show());
+                                }
+                            }
+                        });
                     }
                 }).show();
+    }
+
+    private void shareRegulationFile(File file) {
+        if (isFinishing() || isDestroyed()) {
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_SEND);
+        Uri uri = FileProvider.getUriForFile(this, BuildConfig.APPLICATION_ID + ".fileprovider", file);
+        intent.setDataAndType(uri, "text/plain");
+        intent.putExtra(Intent.EXTRA_STREAM, uri);
+        intent.setClipData(ClipData.newUri(getContentResolver(), "regulation", uri));
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        startActivity(Intent.createChooser(intent, "保存"));
     }
 
     static class AppDescribeItem {
@@ -539,8 +564,10 @@ public class ListDataActivity extends BaseActivity {
                             public void run() {
                                 item.appDescribe.widgetOnOff = isChecked;
                                 item.appDescribe.coordinateOnOff = isChecked;
-                                dataDao.updateAppDescribe(item.appDescribe);
-                                MyUtils.requestUpdateAppDescribe(item.appDescribe.appPackage);
+                                MyApplication.executeDatabase(() -> {
+                                    dataDao.updateAppDescribe(item.appDescribe);
+                                    MyUtils.requestUpdateAppDescribe(item.appDescribe.appPackage);
+                                });
                             }
                         };
                         if (isChecked && pkgSuggestNotOnList.contains(item.appDescribe.appPackage)) {

@@ -3,12 +3,14 @@ package com.lgh.tapclick.mybean;
 import android.graphics.Rect;
 
 import androidx.room.Entity;
+import androidx.room.Ignore;
 import androidx.room.Index;
 import androidx.room.PrimaryKey;
 
-import java.util.Objects;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
-@Entity(indices = @Index(value = {"id"}, unique = true))
+@Entity(indices = @Index(value = {"appPackage"}))
 public class Widget {
     public static final int ACTION_CLICK = 0;
     public static final int ACTION_BACK = 1;
@@ -38,6 +40,10 @@ public class Widget {
     public int clickNumber;
     public int action;
     public int condition;
+    @Ignore
+    private transient Pattern widgetDescribePattern;
+    @Ignore
+    private transient Pattern widgetTextPattern;
 
     public Widget() {
         this.appPackage = "";
@@ -85,23 +91,48 @@ public class Widget {
         this.action = widget.action;
         this.condition = widget.condition;
         this.triggerReason = widget.triggerReason;
+        preparePatterns();
     }
 
-    @Override
-    public boolean equals(Object obj) {
-        if (obj == null) return false;
-        if (this == obj) return true;
-        if (!(obj instanceof Widget)) return false;
-        Widget widget = (Widget) obj;
-        return Objects.equals(this.appPackage, widget.appPackage)
-                && Objects.equals(this.appActivity, widget.appActivity)
-                && Objects.equals(this.widgetRect, widget.widgetRect)
-                && Objects.equals(this.widgetNodeId, widget.widgetNodeId);
+    public void preparePatterns() {
+        widgetDescribePattern = compilePattern(widgetDescribe);
+        widgetTextPattern = compilePattern(widgetText);
     }
 
-    @Override
-    public int hashCode() {
-        return Objects.hash(this.appPackage, this.appActivity, this.widgetRect, this.widgetNodeId);
+    public boolean matchesDescribe(String value) {
+        return value != null && widgetDescribePattern != null && widgetDescribePattern.matcher(value).matches();
+    }
+
+    public boolean matchesText(String value) {
+        return value != null && widgetTextPattern != null && widgetTextPattern.matcher(value).matches();
+    }
+
+    public void validatePatterns() {
+        validatePattern(widgetDescribe, "控件描述");
+        validatePattern(widgetText, "控件文本");
+        preparePatterns();
+    }
+
+    private static Pattern compilePattern(String expression) {
+        if (expression == null || expression.isEmpty()) {
+            return null;
+        }
+        try {
+            return Pattern.compile(expression);
+        } catch (PatternSyntaxException ignored) {
+            return null;
+        }
+    }
+
+    private static void validatePattern(String expression, String fieldName) {
+        if (expression == null || expression.isEmpty()) {
+            return;
+        }
+        try {
+            Pattern.compile(expression);
+        } catch (PatternSyntaxException e) {
+            throw new IllegalArgumentException(fieldName + "正则表达式无效：" + e.getDescription(), e);
+        }
     }
 
     @Override

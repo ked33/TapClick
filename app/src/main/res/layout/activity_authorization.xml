@@ -16,7 +16,6 @@
             android:layout_height="55dp"
             android:background="@drawable/item_bg_ripple"
             android:gravity="center_vertical"
-            android:orientation="horizontal"
             android:paddingStart="15dp"
             android:paddingEnd="15dp">
 
@@ -26,6 +25,7 @@
                 android:layout_height="30dp"
                 android:layout_alignParentStart="true"
                 android:layout_centerVertical="true"
+                android:contentDescription="无障碍服务状态"
                 android:src="@drawable/ic_ok" />
 
             <androidx.appcompat.widget.AppCompatTextView
@@ -49,140 +49,7 @@
                 android:layout_alignParentEnd="true"
                 android:layout_centerVertical="true"
                 android:alpha="0.5"
-                android:clickable="false"
-                android:focusable="false"
-                android:src="@drawable/forward" />
-        </RelativeLayout>
-
-        <RelativeLayout
-            android:id="@+id/device_admin_on_off"
-            android:layout_width="match_parent"
-            android:layout_height="55dp"
-            android:background="@drawable/item_bg_ripple"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingStart="15dp"
-            android:paddingEnd="15dp">
-
-            <ImageView
-                android:id="@+id/device_admin_on_off_img"
-                android:layout_width="30dp"
-                android:layout_height="30dp"
-                android:layout_alignParentStart="true"
-                android:layout_centerVertical="true"
-                android:src="@drawable/ic_ok" />
-
-            <androidx.appcompat.widget.AppCompatTextView
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_centerVertical="true"
-                android:layout_toStartOf="@id/device_admin_forward"
-                android:layout_toEndOf="@id/device_admin_on_off_img"
-                android:gravity="center_vertical|start"
-                android:paddingStart="15dp"
-                android:paddingEnd="15dp"
-                android:singleLine="true"
-                android:text="设备管理器权限"
-                android:textColor="@color/text_color"
-                android:textSize="20sp" />
-
-            <ImageView
-                android:id="@+id/device_admin_forward"
-                android:layout_width="15dp"
-                android:layout_height="15dp"
-                android:layout_alignParentEnd="true"
-                android:layout_centerVertical="true"
-                android:alpha="0.5"
-                android:clickable="false"
-                android:focusable="false"
-                android:src="@drawable/forward" />
-        </RelativeLayout>
-
-        <RelativeLayout
-            android:id="@+id/system_alert_on_off"
-            android:layout_width="match_parent"
-            android:layout_height="55dp"
-            android:background="@drawable/item_bg_ripple"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingStart="15dp"
-            android:paddingEnd="15dp">
-
-            <ImageView
-                android:id="@+id/system_alert_on_off_img"
-                android:layout_width="30dp"
-                android:layout_height="30dp"
-                android:layout_alignParentStart="true"
-                android:layout_centerVertical="true"
-                android:src="@drawable/ic_ok" />
-
-            <androidx.appcompat.widget.AppCompatTextView
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_centerVertical="true"
-                android:layout_toStartOf="@id/system_alert_forward"
-                android:layout_toEndOf="@id/system_alert_on_off_img"
-                android:gravity="center_vertical|start"
-                android:paddingStart="15dp"
-                android:paddingEnd="15dp"
-                android:singleLine="true"
-                android:text="显示悬浮窗权限"
-                android:textColor="@color/text_color"
-                android:textSize="20sp" />
-
-            <ImageView
-                android:id="@+id/system_alert_forward"
-                android:layout_width="15dp"
-                android:layout_height="15dp"
-                android:layout_alignParentEnd="true"
-                android:layout_centerVertical="true"
-                android:alpha="0.5"
-                android:clickable="false"
-                android:focusable="false"
-                android:src="@drawable/forward" />
-        </RelativeLayout>
-
-        <RelativeLayout
-            android:id="@+id/batteryIgnore_on_off"
-            android:layout_width="match_parent"
-            android:layout_height="55dp"
-            android:background="@drawable/item_bg_ripple"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingStart="15dp"
-            android:paddingEnd="15dp">
-
-            <ImageView
-                android:id="@+id/batteryIgnore_on_off_img"
-                android:layout_width="30dp"
-                android:layout_height="30dp"
-                android:layout_alignParentStart="true"
-                android:layout_centerVertical="true"
-                android:src="@drawable/ic_ok" />
-
-            <androidx.appcompat.widget.AppCompatTextView
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_centerVertical="true"
-                android:layout_toStartOf="@id/batteryIgnore_forward"
-                android:layout_toEndOf="@id/batteryIgnore_on_off_img"
-                android:gravity="center_vertical|start"
-                android:paddingStart="15dp"
-                android:paddingEnd="15dp"
-                android:singleLine="true"
-                android:text="忽略电池优化权限"
-                android:textColor="@color/text_color"
-                android:textSize="20sp" />
-
-            <ImageView
-                android:id="@+id/batteryIgnore_forward"
-                android:layout_width="15dp"
-                android:layout_height="15dp"
-                android:layout_alignParentEnd="true"
-                android:layout_centerVertical="true"
-                android:alpha="0.5"
-                android:clickable="false"
-                android:focusable="false"
+                android:contentDescription="打开设置"
                 android:src="@drawable/forward" />
         </RelativeLayout>
 
@@ -192,7 +59,6 @@
             android:layout_height="55dp"
             android:background="@drawable/item_bg_ripple"
             android:gravity="center_vertical"
-            android:orientation="horizontal"
             android:paddingStart="15dp"
             android:paddingEnd="15dp">
 
@@ -202,6 +68,7 @@
                 android:layout_height="30dp"
                 android:layout_alignParentStart="true"
                 android:layout_centerVertical="true"
+                android:contentDescription="前台通知状态"
                 android:src="@drawable/ic_ok" />
 
             <androidx.appcompat.widget.AppCompatTextView
@@ -225,8 +92,7 @@
                 android:layout_alignParentEnd="true"
                 android:layout_centerVertical="true"
                 android:alpha="0.5"
-                android:clickable="false"
-                android:focusable="false"
+                android:contentDescription="切换前台通知"
                 android:src="@drawable/forward" />
         </RelativeLayout>
 
@@ -236,7 +102,6 @@
             android:layout_height="55dp"
             android:background="@drawable/item_bg_ripple"
             android:gravity="center_vertical"
-            android:orientation="horizontal"
             android:paddingStart="15dp"
             android:paddingEnd="15dp">
 
@@ -246,6 +111,7 @@
                 android:layout_height="30dp"
                 android:layout_alignParentStart="true"
                 android:layout_centerVertical="true"
+                android:contentDescription="零像素悬浮层状态"
                 android:src="@drawable/ic_ok" />
 
             <androidx.appcompat.widget.AppCompatTextView
@@ -258,7 +124,7 @@
                 android:paddingStart="15dp"
                 android:paddingEnd="15dp"
                 android:singleLine="true"
-                android:text="零像素点悬浮窗保活"
+                android:text="无障碍零像素悬浮层保活"
                 android:textColor="@color/text_color"
                 android:textSize="20sp" />
 
@@ -269,8 +135,7 @@
                 android:layout_alignParentEnd="true"
                 android:layout_centerVertical="true"
                 android:alpha="0.5"
-                android:clickable="false"
-                android:focusable="false"
+                android:contentDescription="切换零像素悬浮层"
                 android:src="@drawable/forward" />
         </RelativeLayout>
 
@@ -283,7 +148,7 @@
             android:requiresFadingEdge="vertical"
             android:scrollbars="none">
 
-            <me.codeboy.android.aligntextview.AlignTextView
+            <androidx.appcompat.widget.AppCompatTextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginHorizontal="16dp"
@@ -291,6 +156,4 @@
                 android:text="@string/authorizationQuestion" />
         </ScrollView>
     </androidx.appcompat.widget.LinearLayoutCompat>
-
-    <include layout="@layout/view_no_vip" />
 </FrameLayout>
