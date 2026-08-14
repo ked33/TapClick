@@ -12,6 +12,7 @@ import com.lgh.tapclick.mybean.Coordinate;
 import com.lgh.tapclick.mybean.Regulation;
 import com.lgh.tapclick.mybean.Widget;
 import com.lgh.tapclick.myclass.AccessibilityLayoutSnapshot;
+import com.lgh.tapclick.myclass.RuntimeAppDescribeMap;
 import com.lgh.tapclick.myfunction.RuntimeLogFormatter;
 import com.lgh.tapclick.myfunction.WidgetScanPolicy;
 
@@ -189,5 +190,35 @@ public class RuleIntegrityTest {
         assertTrue(releaseLog.contains("reason=Text 匹配"));
         assertTrue(releaseLog.contains("result=点击已执行"));
         assertFalse(releaseLog.contains("widgetText"));
+    }
+
+    @Test
+    public void runtimeAppDescribeSnapshotCanAddNewAppWithoutMutatingPublishedMap() {
+        Map<String, AppDescribe> published = RuntimeAppDescribeMap.immutableSnapshot(null);
+        AppDescribe describe = new AppDescribe();
+        describe.appPackage = "new.example.app";
+
+        Map<String, AppDescribe> updated = RuntimeAppDescribeMap.withEntry(
+                published, describe.appPackage, describe);
+
+        assertTrue(published.isEmpty());
+        assertEquals(describe, updated.get(describe.appPackage));
+        assertThrows(UnsupportedOperationException.class,
+                () -> updated.put("another.app", new AppDescribe()));
+    }
+
+    @Test
+    public void captureRuntimeLogContainsTimingAndBoundedSummaryFields() {
+        String summary = RuntimeLogFormatter.formatCaptureSummary(
+                "complete", "example.app", true, 187,
+                "source=activeRoot windows=0 visited=42 nodes=18");
+
+        assertTrue(summary.contains("布局捕获"));
+        assertTrue(summary.contains("phase=complete"));
+        assertTrue(summary.contains("app=example.app"));
+        assertTrue(summary.contains("mode=quick"));
+        assertTrue(summary.contains("elapsedMs=187"));
+        assertTrue(summary.contains("visited=42"));
+        assertFalse(summary.contains("AccessibilityNodeInfo"));
     }
 }

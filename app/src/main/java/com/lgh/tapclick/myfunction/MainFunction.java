@@ -63,6 +63,7 @@ import com.lgh.tapclick.myclass.AccessibilityLayoutSnapshot;
 import com.lgh.tapclick.myclass.DataDao;
 import com.lgh.tapclick.myclass.MyApplication;
 import com.lgh.tapclick.myclass.PackageCatalog;
+import com.lgh.tapclick.myclass.RuntimeAppDescribeMap;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
@@ -71,6 +72,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
@@ -102,11 +104,18 @@ import cn.hutool.core.util.StrUtil;
  */
 
 public class MainFunction {
+    private static final long QUICK_CAPTURE_PANEL_TIMEOUT_MILLIS = 250L;
+    private static final long QUICK_CAPTURE_BUDGET_MILLIS = 180L;
+    private static final int QUICK_CAPTURE_MAX_NODES = 400;
+    private static final long MANUAL_CAPTURE_BUDGET_MILLIS = 1500L;
+    private static final int MANUAL_CAPTURE_MAX_NODES = 5000;
+
     private final AccessibilityService service;
     private final WindowManager windowManager;
     private final PackageManager packageManager;
     private final DataDao dataDao;
     private volatile Map<String, AppDescribe> appDescribeMap;
+    private final Object appDescribeMapLock;
     private final ScheduledThreadPoolExecutor executorServiceMain;
     private final ScheduledThreadPoolExecutor executorServiceSub;
     private final ScheduledThreadPoolExecutor executorServiceCapture;
@@ -148,6 +157,7 @@ public class MainFunction {
     private WindowManager.LayoutParams aParams, bParams, cParams;
     private ViewAddDataBinding addDataBinding;
     private ViewWidgetSelectBinding widgetSelectBinding;
+    private volatile Widget activeWidgetSelection;
     private ImageView viewClickPosition;
     private volatile Set<String> pkgSuggestNotOnList;
     private View ignoreView;
@@ -182,6 +192,7 @@ public class MainFunction {
         debounceSet = Collections.newSetFromMap(new ConcurrentHashMap<>());
         logList = new LinkedList<>();
         serviceInfoLock = new Object();
+        appDescribeMapLock = new Object();
         pageTaskLock = new Object();
         pageTaskFutures = new HashSet<>();
         layoutCaptureGeneration = new AtomicLong();
@@ -447,7 +458,7 @@ public class MainFunction {
             @Override
             public void run() {
                 AppDescribe describe = dataDao.getAppDescribeByPackage(packageName);
-                Map<String, AppDescribe> snapshot = new HashMap<>(appDescribeMap);
+                Map<String, AppDescribe> snapshot = copyAppDescribeMap();
                 if (describe == null || (!describe.coordinateOnOff && !describe.widgetOnOff)) {
                     snapshot.remove(packageName);
                 } else {
@@ -465,7 +476,7 @@ public class MainFunction {
                         snapshot.remove(packageName);
                     }
                 }
-                appDescribeMap = Collections.unmodifiableMap(snapshot);
+                replaceAppDescribeMap(snapshot);
                 if (TextUtils.equals(packageName, currentPackage)) {
                     appDescribe = snapshot.containsKey(packageName)
                             ? snapshot.get(packageName) : new AppDescribe();
@@ -482,11 +493,11 @@ public class MainFunction {
         executorServiceSub.execute(new Runnable() {
             @Override
             public void run() {
-                Map<String, AppDescribe> snapshot = new HashMap<>(appDescribeMap);
+                Map<String, AppDescribe> snapshot = copyAppDescribeMap();
                 for (String packageName : packageNames) {
                     snapshot.remove(packageName);
                 }
-                appDescribeMap = Collections.unmodifiableMap(snapshot);
+                replaceAppDescribeMap(snapshot);
                 if (packageNames.contains(currentPackage)) {
                     appDescribe = new AppDescribe();
                     deactivateCurrentPage(false);
@@ -757,11 +768,33 @@ public class MainFunction {
         List<Widget> widgets = dataDao.getEnabledWidgets();
         Map<String, AppDescribe> snapshot = AppDescribe.buildRuntimeSnapshot(
                 appDescribeList, coordinates, widgets);
-        appDescribeMap = Collections.unmodifiableMap(snapshot);
+        replaceAppDescribeMap(snapshot);
         if (!currentPackage.isEmpty()) {
             appDescribe = snapshot.containsKey(currentPackage)
                     ? snapshot.get(currentPackage) : new AppDescribe();
             deactivateCurrentPage(false);
+        }
+    }
+
+    private Map<String, AppDescribe> copyAppDescribeMap() {
+        synchronized (appDescribeMapLock) {
+            return new HashMap<>(appDescribeMap);
+        }
+    }
+
+    private void replaceAppDescribeMap(Map<String, AppDescribe> snapshot) {
+        synchronized (appDescribeMapLock) {
+            appDescribeMap = RuntimeAppDescribeMap.immutableSnapshot(snapshot);
+        }
+    }
+
+    private void putAppDescribeInRuntimeMap(String packageName, AppDescribe describe) {
+        if (TextUtils.isEmpty(packageName) || describe == null) {
+            return;
+        }
+        synchronized (appDescribeMapLock) {
+            appDescribeMap = RuntimeAppDescribeMap.withEntry(
+                    appDescribeMap, packageName, describe);
         }
     }
 
@@ -785,6 +818,7 @@ public class MainFunction {
             return;
         }
         final Widget widgetSelect = new Widget();
+        activeWidgetSelection = widgetSelect;
         final Coordinate coordinateSelect = new Coordinate();
         final LayoutInflater inflater = LayoutInflater.from(service);
 
@@ -1056,7 +1090,7 @@ public class MainFunction {
                                         // e.printStackTrace();
                                     }
                                     appDescribeTemp.id = dataDao.insertAppDescribe(appDescribeTemp);
-                                    appDescribeMap.put(appDescribeTemp.appPackage, appDescribeTemp);
+                                    putAppDescribeInRuntimeMap(appDescribeTemp.appPackage, appDescribeTemp);
                                 }
                                 Widget temWidget = new Widget(widgetSelect);
                                 temWidget.createTime = System.currentTimeMillis();
@@ -1115,15 +1149,15 @@ public class MainFunction {
                         appDescribeTemp = appDescribeMap.get(coordinateSelect.appPackage);
                         if (appDescribeTemp == null) {
                             appDescribeTemp = new AppDescribe();
-                            appDescribeTemp.appPackage = widgetSelect.appPackage;
+                            appDescribeTemp.appPackage = coordinateSelect.appPackage;
                             try {
-                                PackageInfo packageInfo = packageManager.getPackageInfo(widgetSelect.appPackage, PackageManager.GET_META_DATA);
+                                PackageInfo packageInfo = packageManager.getPackageInfo(coordinateSelect.appPackage, PackageManager.GET_META_DATA);
                                 appDescribeTemp.appName = packageManager.getApplicationLabel(packageInfo.applicationInfo).toString();
                             } catch (PackageManager.NameNotFoundException e) {
                                 // e.printStackTrace();
                             }
                             appDescribeTemp.id = dataDao.insertAppDescribe(appDescribeTemp);
-                            appDescribeMap.put(appDescribeTemp.appPackage, appDescribeTemp);
+                            putAppDescribeInRuntimeMap(appDescribeTemp.appPackage, appDescribeTemp);
                         }
                         Coordinate temCoordinate = new Coordinate(coordinateSelect);
                         temCoordinate.createTime = System.currentTimeMillis();
@@ -1159,6 +1193,7 @@ public class MainFunction {
                 widgetSelectBinding = null;
                 addDataBinding = null;
                 viewClickPosition = null;
+                activeWidgetSelection = null;
             }
         });
         windowManager.addView(widgetSelectBinding.getRoot(), bParams);
@@ -1193,16 +1228,38 @@ public class MainFunction {
         long captureGeneration = layoutCaptureGeneration.incrementAndGet();
         String packageAtRequest = currentPackage;
         String activityAtRequest = currentActivity;
-        captureLayoutAsync(packageAtRequest, activityAtRequest, snapshot -> {
-            quickCaptureInProgress.set(false);
+        long requestStartedNanos = System.nanoTime();
+        AtomicBoolean panelShown = new AtomicBoolean(false);
+        addCaptureLog("request", packageAtRequest, true, 0L,
+                "activity=" + valueOrUnknown(activityAtRequest));
+        Runnable fallback = () -> {
             if (closed.get() || captureGeneration != layoutCaptureGeneration.get()) {
                 return;
             }
-            if (snapshot == null || snapshot.isEmpty()) {
-                Toast.makeText(service, "未捕获到当前页面控件，请重新双击", Toast.LENGTH_SHORT).show();
+            if (panelShown.compareAndSet(false, true)) {
+                quickCaptureInProgress.set(false);
+                showQuickCapturePanel(null, packageAtRequest, "timeout", requestStartedNanos);
+            }
+        };
+        mainHandler.postDelayed(fallback, QUICK_CAPTURE_PANEL_TIMEOUT_MILLIS);
+        captureLayoutAsync(packageAtRequest, activityAtRequest, true, snapshot -> {
+            quickCaptureInProgress.set(false);
+            if (closed.get() || captureGeneration != layoutCaptureGeneration.get()) {
+                mainHandler.removeCallbacks(fallback);
                 return;
             }
-            showAddDataWindow(snapshot);
+            if (panelShown.compareAndSet(false, true)) {
+                mainHandler.removeCallbacks(fallback);
+                if (snapshot == null || snapshot.isEmpty()) {
+                    showQuickCapturePanel(null, packageAtRequest, "empty", requestStartedNanos);
+                } else {
+                    showQuickCapturePanel(snapshot, packageAtRequest, "snapshot", requestStartedNanos);
+                }
+                return;
+            }
+            if (snapshot != null && !snapshot.isEmpty()) {
+                renderQuickCapturedLayout(snapshot, captureGeneration);
+            }
         });
     }
 
@@ -1217,7 +1274,9 @@ public class MainFunction {
         long captureGeneration = layoutCaptureGeneration.incrementAndGet();
         String packageAtRequest = currentPackage;
         String activityAtRequest = currentActivity;
-        captureLayoutAsync(packageAtRequest, activityAtRequest, snapshot -> {
+        addCaptureLog("request", packageAtRequest, false, 0L,
+                "activity=" + valueOrUnknown(activityAtRequest));
+        captureLayoutAsync(packageAtRequest, activityAtRequest, false, snapshot -> {
             if (closed.get()
                     || captureGeneration != layoutCaptureGeneration.get()
                     || requestedAddBinding != addDataBinding
@@ -1235,57 +1294,107 @@ public class MainFunction {
     }
 
     private void captureLayoutAsync(String packageAtRequest, String activityAtRequest,
-                                    LayoutCaptureCallback callback) {
+                                    boolean quick, LayoutCaptureCallback callback) {
         try {
             executorServiceCapture.execute(() -> {
                 AccessibilityLayoutSnapshot capturedSnapshot = null;
+                CaptureTrace trace = new CaptureTrace();
                 try {
                     capturedSnapshot = captureCurrentLayout(
-                            packageAtRequest, activityAtRequest);
-                } catch (RuntimeException ignored) {
+                            packageAtRequest, activityAtRequest, quick, trace);
+                } catch (RuntimeException exception) {
                     // A window can disappear between the double tap and the
                     // accessibility IPC. Report a failed capture on the UI thread.
+                    trace.failure = exception.getClass().getSimpleName();
                 }
+                trace.elapsedMillis = elapsedMillis(trace.startedNanos);
+                trace.capturedNodes = capturedSnapshot == null
+                        ? 0 : capturedSnapshot.getNodes().size();
+                addCaptureLog("complete", packageAtRequest, quick,
+                        trace.elapsedMillis, trace.toDetails());
                 AccessibilityLayoutSnapshot snapshot = capturedSnapshot;
                 mainHandler.post(() -> callback.onCaptured(snapshot));
             });
         } catch (RejectedExecutionException ignored) {
+            addCaptureLog("rejected", packageAtRequest, quick, 0L, "executor=shutdown");
             mainHandler.post(() -> callback.onCaptured(null));
         }
     }
 
     private AccessibilityLayoutSnapshot captureCurrentLayout(String packageAtRequest,
-                                                               String activityAtRequest) {
+                                                               String activityAtRequest,
+                                                               boolean quick,
+                                                               CaptureTrace trace) {
         if (closed.get()) {
+            trace.failure = "closed";
             return null;
         }
-        AccessibilityNodeInfo activeRoot = service.getRootInActiveWindow();
+        AccessibilityNodeInfo activeRoot;
+        try {
+            activeRoot = service.getRootInActiveWindow();
+        } catch (RuntimeException exception) {
+            trace.failure = "activeRoot:" + exception.getClass().getSimpleName();
+            return null;
+        }
         if (activeRoot == null || activeRoot.getPackageName() == null) {
+            trace.failure = "activeRootUnavailable";
             return null;
         }
         String capturedPackage = activeRoot.getPackageName().toString();
         if (StrUtil.isNotBlank(packageAtRequest)
                 && !TextUtils.equals(packageAtRequest, capturedPackage)) {
+            trace.failure = "packageChanged:" + capturedPackage;
             return null;
         }
 
         String capturedActivity = StrUtil.isNotBlank(activityAtRequest)
                 ? activityAtRequest : currentActivity;
         List<AccessibilityLayoutSnapshot.Node> capturedNodes = new ArrayList<>();
-        List<AccessibilityWindowInfo> windows = new ArrayList<>(service.getWindows());
-        Collections.reverse(windows);
-        for (AccessibilityWindowInfo window : windows) {
-            AccessibilityNodeInfo windowRoot = window.getRoot();
-            if (windowRoot == null
-                    || !TextUtils.equals(windowRoot.getPackageName(), capturedPackage)) {
-                continue;
+        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(
+                quick ? QUICK_CAPTURE_BUDGET_MILLIS : MANUAL_CAPTURE_BUDGET_MILLIS);
+        int maxNodes = quick ? QUICK_CAPTURE_MAX_NODES : MANUAL_CAPTURE_MAX_NODES;
+        if (quick) {
+            trace.source = "activeRoot";
+            appendCapturedNodes(activeRoot, capturedNodes, deadlineNanos, maxNodes, trace, false);
+        } else {
+            List<AccessibilityWindowInfo> windows = new ArrayList<>();
+            try {
+                List<AccessibilityWindowInfo> serviceWindows = service.getWindows();
+                if (serviceWindows != null) {
+                    windows.addAll(serviceWindows);
+                }
+            } catch (RuntimeException exception) {
+                trace.failure = "windows:" + exception.getClass().getSimpleName();
             }
-            appendCapturedNodes(windowRoot, capturedNodes);
+            trace.windowCount = windows.size();
+            Collections.reverse(windows);
+            for (AccessibilityWindowInfo window : windows) {
+                if (System.nanoTime() >= deadlineNanos || capturedNodes.size() >= maxNodes) {
+                    break;
+                }
+                try {
+                    AccessibilityNodeInfo windowRoot = window.getRoot();
+                    if (windowRoot == null
+                            || !TextUtils.equals(windowRoot.getPackageName(), capturedPackage)) {
+                        continue;
+                    }
+                    trace.source = "windows";
+                    appendCapturedNodes(windowRoot, capturedNodes, deadlineNanos,
+                            maxNodes, trace, true);
+                } catch (RuntimeException exception) {
+                    trace.failure = "windowRoot:" + exception.getClass().getSimpleName();
+                }
+            }
         }
         if (capturedNodes.isEmpty()) {
-            appendCapturedNodes(activeRoot, capturedNodes);
+            trace.source = "activeRootFallback";
+            appendCapturedNodes(activeRoot, capturedNodes, deadlineNanos,
+                    maxNodes, trace, false);
         }
         if (capturedNodes.isEmpty()) {
+            if (trace.failure == null) {
+                trace.failure = "noNodes";
+            }
             return null;
         }
 
@@ -1294,13 +1403,23 @@ public class MainFunction {
     }
 
     private void appendCapturedNodes(AccessibilityNodeInfo root,
-                                     List<AccessibilityLayoutSnapshot.Node> capturedNodes) {
+                                     List<AccessibilityLayoutSnapshot.Node> capturedNodes,
+                                     long deadlineNanos,
+                                     int maxNodes,
+                                     CaptureTrace trace,
+                                     boolean includeModuleQuery) {
+        if (root == null || capturedNodes.size() >= maxNodes || System.nanoTime() >= deadlineNanos) {
+            return;
+        }
         ArrayDeque<AccessibilityNodeInfo> pendingNodes = new ArrayDeque<>();
-        Set<AccessibilityNodeInfo> visitedNodes = new HashSet<>();
+        Set<AccessibilityNodeInfo> visitedNodes = Collections.newSetFromMap(new IdentityHashMap<>());
         pendingNodes.offer(root);
-        if (MyUtils.isModuleValid()) {
+        if (includeModuleQuery && MyUtils.isModuleValid()) {
             try {
                 for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText(null)) {
+                    if (System.nanoTime() >= deadlineNanos || pendingNodes.size() >= maxNodes * 2) {
+                        break;
+                    }
                     if (node != null) {
                         pendingNodes.offer(node);
                     }
@@ -1310,11 +1429,18 @@ public class MainFunction {
             }
         }
 
-        while (!pendingNodes.isEmpty()) {
+        int visitedCount = 0;
+        int maxVisitedNodes = Math.max(maxNodes * 2, maxNodes);
+        while (!pendingNodes.isEmpty()
+                && capturedNodes.size() < maxNodes
+                && visitedCount < maxVisitedNodes
+                && System.nanoTime() < deadlineNanos) {
             AccessibilityNodeInfo node = pendingNodes.poll();
             if (node == null || !visitedNodes.add(node)) {
                 continue;
             }
+            visitedCount++;
+            trace.visitedNodes++;
             try {
                 Rect bounds = new Rect();
                 node.getBoundsInScreen(bounds);
@@ -1336,6 +1462,9 @@ public class MainFunction {
             }
             try {
                 for (int childIndex = 0; childIndex < node.getChildCount(); childIndex++) {
+                    if (System.nanoTime() >= deadlineNanos || pendingNodes.size() >= maxNodes * 2) {
+                        break;
+                    }
                     AccessibilityNodeInfo child = node.getChild(childIndex);
                     if (child != null) {
                         pendingNodes.offer(child);
@@ -1345,6 +1474,40 @@ public class MainFunction {
                 // The copied properties remain valid even if child lookup fails.
             }
         }
+    }
+
+    private void renderQuickCapturedLayout(AccessibilityLayoutSnapshot snapshot,
+                                           long captureGeneration) {
+        if (closed.get()
+                || captureGeneration != layoutCaptureGeneration.get()
+                || addDataBinding == null
+                || widgetSelectBinding == null
+                || activeWidgetSelection == null) {
+            return;
+        }
+        if (bParams == null || bParams.alpha != 0f
+                || activeWidgetSelection.widgetRect != null) {
+            return;
+        }
+        addCaptureLog("lateRender", snapshot.getAppPackage(), true, 0L,
+                "nodes=" + snapshot.getNodes().size());
+        renderCapturedLayout(snapshot, activeWidgetSelection);
+    }
+
+    private void showQuickCapturePanel(AccessibilityLayoutSnapshot snapshot,
+                                       String packageName, String source,
+                                       long requestStartedNanos) {
+        int nodeCount = snapshot == null ? 0 : snapshot.getNodes().size();
+        addCaptureLog("panelStart", packageName, true,
+                elapsedMillis(requestStartedNanos),
+                "source=" + source + " nodes=" + nodeCount);
+        showAddDataWindow(snapshot);
+        boolean created = addDataBinding != null
+                && widgetSelectBinding != null
+                && viewClickPosition != null;
+        addCaptureLog("panelReady", packageName, true,
+                elapsedMillis(requestStartedNanos),
+                "source=" + source + " nodes=" + nodeCount + " created=" + created);
     }
 
     private void renderCapturedLayout(AccessibilityLayoutSnapshot snapshot, Widget widgetSelect) {
@@ -1457,6 +1620,41 @@ public class MainFunction {
         widgetSelectBinding.frame.removeAllViews();
         addDataBinding.switchWid.setEnabled(true);
         addDataBinding.switchWid.setText("显示布局");
+    }
+
+    private static long elapsedMillis(long startedNanos) {
+        return TimeUnit.NANOSECONDS.toMillis(Math.max(0L, System.nanoTime() - startedNanos));
+    }
+
+    private void addCaptureLog(String phase, String packageName, boolean quick,
+                               long elapsedMillis, String details) {
+        if (!runtimeLoggingEnabled) {
+            return;
+        }
+        addLog(RuntimeLogFormatter.formatCaptureSummary(
+                phase, packageName, quick, elapsedMillis, details));
+    }
+
+    private static String valueOrUnknown(String value) {
+        return value == null || value.isEmpty() ? "未知" : value;
+    }
+
+    private static final class CaptureTrace {
+        private final long startedNanos = System.nanoTime();
+        private int windowCount;
+        private int visitedNodes;
+        private int capturedNodes;
+        private String source = "none";
+        private String failure;
+        private long elapsedMillis;
+
+        private String toDetails() {
+            return "source=" + source
+                    + " windows=" + windowCount
+                    + " visited=" + visitedNodes
+                    + " nodes=" + capturedNodes
+                    + (failure == null ? "" : " failure=" + failure);
+        }
     }
 
     private interface LayoutCaptureCallback {
@@ -1572,6 +1770,8 @@ public class MainFunction {
                     long interval = currentTime - previousTime;
                     previousTime = currentTime;
                     if (interval <= 1000) {
+                        addCaptureLog("doubleTap", currentPackage, true, interval,
+                                "received=true");
                         showAddDataWindow(true);
                     }
                 }
@@ -1863,6 +2063,7 @@ public class MainFunction {
         widgetSelectBinding = null;
         addDataBinding = null;
         viewClickPosition = null;
+        activeWidgetSelection = null;
         ignoreView = null;
         dbClickView = null;
         alreadyClickSet.clear();
@@ -1870,7 +2071,7 @@ public class MainFunction {
         synchronized (this) {
             logList.clear();
         }
-        appDescribeMap = Collections.emptyMap();
+        replaceAppDescribeMap(Collections.emptyMap());
     }
 
     private void removeViewSafely(View view) {

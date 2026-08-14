@@ -21,6 +21,16 @@ public final class RuntimeLogFormatter {
         return summary + " detail=" + fullRuleJson;
     }
 
+    public static String formatCaptureSummary(String phase, String appPackage,
+                                              boolean quick, long elapsedMillis,
+                                              String details) {
+        String summary = "布局捕获 phase=" + valueOrUnknown(phase)
+                + " app=" + valueOrUnknown(appPackage)
+                + " mode=" + (quick ? "quick" : "manual")
+                + " elapsedMs=" + Math.max(0L, elapsedMillis);
+        return details == null || details.isEmpty() ? summary : summary + " " + details;
+    }
+
     private static String valueOrUnknown(String value) {
         return value == null || value.isEmpty() ? "未知" : value;
     }
