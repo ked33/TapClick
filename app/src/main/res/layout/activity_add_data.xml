@@ -26,7 +26,7 @@
                 android:layout_height="wrap_content"
                 android:orientation="vertical">
 
-                <me.codeboy.android.aligntextview.AlignTextView
+                <androidx.appcompat.widget.AppCompatTextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="10dp"
@@ -36,7 +36,7 @@
                     android:text="点击下方的＂创建规则＂按键，将会出现一个用于创建规则的悬浮窗，你可以通过该悬浮窗添加页面的控件或坐标，这样在该控件或坐标再次出现时就会自动对其执行点击动作。"
                     android:textColor="@color/text_color" />
 
-                <me.codeboy.android.aligntextview.AlignTextView
+                <androidx.appcompat.widget.AppCompatTextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="20dp"
@@ -46,7 +46,7 @@
                     android:text="如果你添加了某个页面的控件或者坐标，则在该页面出现时程序就会自动检索该页面的内容，这也许会在一定的程度上造成卡顿，所以为了不影响体验，请合理添加控件或坐标。"
                     android:textColor="@color/text_color" />
 
-                <me.codeboy.android.aligntextview.AlignTextView
+                <androidx.appcompat.widget.AppCompatTextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="20dp"
@@ -56,7 +56,7 @@
                     android:text="添加控件：点击＂显示布局＂按键，在布局分析框出现后选择相应的控件，然后点击＂添加控件＂按键即可。"
                     android:textColor="@color/text_color" />
 
-                <me.codeboy.android.aligntextview.AlignTextView
+                <androidx.appcompat.widget.AppCompatTextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="20dp"
@@ -66,7 +66,7 @@
                     android:text="添加坐标：点击＂显示准星＂按键，拖动准星选择相应的坐标，然后点击＂添加坐标＂按键即可。"
                     android:textColor="@color/text_color" />
 
-                <me.codeboy.android.aligntextview.AlignTextView
+                <androidx.appcompat.widget.AppCompatTextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="20dp"
@@ -76,7 +76,7 @@
                     android:text="重要提示：双击出现的悬浮窗口，可以快速打开当前应用的规则管理页面。"
                     android:textColor="@color/text_color" />
 
-                <me.codeboy.android.aligntextview.AlignTextView
+                <androidx.appcompat.widget.AppCompatTextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="20dp"
