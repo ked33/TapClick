@@ -162,6 +162,11 @@ public abstract class DataDao {
     @Transaction
     public AppDescribe importCoordinate(Coordinate source, String appName) {
         Coordinate coordinate = new Coordinate(source);
+        if (coordinate.visualSignature != null
+                && !coordinate.visualSignature.isEmpty()
+                && !VisualCoordinateSignature.isValid(coordinate.visualSignature)) {
+            throw new IllegalArgumentException("坐标视觉校验数据无效");
+        }
         coordinate.id = null;
         coordinate.createTime = System.currentTimeMillis();
         coordinate.lastTriggerTime = 0;

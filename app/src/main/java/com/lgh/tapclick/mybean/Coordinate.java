@@ -16,6 +16,7 @@ public class Coordinate {
     public int clickDelay;
     public int clickInterval;
     public int clickNumber;
+    public String visualSignature;
     public String comment;
     public long lastTriggerTime;
     public int triggerCount;
@@ -28,6 +29,7 @@ public class Coordinate {
         this.clickDelay = 1000;
         this.clickInterval = 1000;
         this.clickNumber = 1;
+        this.visualSignature = null;
         this.comment = "";
         this.lastTriggerTime = 0;
         this.triggerCount = 0;
@@ -43,6 +45,7 @@ public class Coordinate {
         this.clickDelay = coordinate.clickDelay;
         this.clickInterval = coordinate.clickInterval;
         this.clickNumber = coordinate.clickNumber;
+        this.visualSignature = coordinate.visualSignature;
         this.comment = coordinate.comment;
         this.lastTriggerTime = coordinate.lastTriggerTime;
         this.triggerCount = coordinate.triggerCount;
@@ -60,6 +63,8 @@ public class Coordinate {
                 ", clickDelay=" + clickDelay +
                 ", clickInterval=" + clickInterval +
                 ", clickNumber=" + clickNumber +
+                ", visualVerification=" + (visualSignature != null && !visualSignature.isEmpty()) +
+                ", visualSignatureLength=" + (visualSignature == null ? 0 : visualSignature.length()) +
                 ", comment='" + comment + '\'' +
                 ", lastTriggerTime=" + lastTriggerTime +
                 ", triggerCount=" + triggerCount +

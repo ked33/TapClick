@@ -50,6 +50,7 @@ import com.lgh.tapclick.myclass.DataDao;
 import com.lgh.tapclick.myclass.ExportFileManager;
 import com.lgh.tapclick.myclass.MyApplication;
 import com.lgh.tapclick.myclass.PackageCatalog;
+import com.lgh.tapclick.myclass.VisualCoordinateSignature;
 import com.lgh.tapclick.myfunction.MyUtils;
 
 import java.io.File;
@@ -301,6 +302,7 @@ public class EditDataActivity extends BaseActivity {
             coordinateBinding.coordinateClickNumber.setText(String.valueOf(coordinate.clickNumber));
             coordinateBinding.coordinateTriggerCount.setText(String.valueOf(coordinate.triggerCount));
             coordinateBinding.coordinateComment.setText(coordinate.comment);
+            updateCoordinateVisualStatus(coordinateBinding, coordinate);
             long day1 = (System.currentTimeMillis() - coordinate.createTime) / (1000 * 60 * 60 * 24);
             long day2 = (System.currentTimeMillis() - coordinate.lastTriggerTime) / (1000 * 60 * 60 * 24);
             coordinateBinding.coordinateCreateTime.setText(String.format("%s (%s天前)", dateFormat.format(new Date(coordinate.createTime)), day1));
@@ -355,12 +357,19 @@ public class EditDataActivity extends BaseActivity {
                         coordinateBinding.coordinateModify.setText("点击次数不能为空");
                         return;
                     }
-                    coordinate.xPosition = Integer.parseInt(sX);
-                    coordinate.yPosition = Integer.parseInt(sY);
+                    int xPosition = Integer.parseInt(sX);
+                    int yPosition = Integer.parseInt(sY);
+                    if ((coordinate.xPosition != xPosition || coordinate.yPosition != yPosition)
+                            && !TextUtils.isEmpty(coordinate.visualSignature)) {
+                        coordinate.visualSignature = null;
+                    }
+                    coordinate.xPosition = xPosition;
+                    coordinate.yPosition = yPosition;
                     coordinate.clickDelay = Integer.parseInt(sDelay);
                     coordinate.clickInterval = Integer.parseInt(sInterval);
                     coordinate.clickNumber = Integer.parseInt(sNumber);
                     coordinate.comment = StrUtil.trimToEmpty(coordinateBinding.coordinateComment.getText());
+                    updateCoordinateVisualStatus(coordinateBinding, coordinate);
                     queueCoordinateSave(coordinate);
                     coordinateBinding.coordinateModify.setTextColor(0xff000000);
                     coordinateBinding.coordinateModify.setText(dateFormatModify.format(new Date()) + " (已修改)");
@@ -687,6 +696,21 @@ public class EditDataActivity extends BaseActivity {
         super.onDestroy();
         if (myAppConfig != null && myAppConfig.autoHideOnTaskList) {
             MyUtils.setExcludeFromRecents(true);
+        }
+    }
+
+    private static void updateCoordinateVisualStatus(ViewCoordinateBinding binding,
+                                                     Coordinate coordinate) {
+        if (TextUtils.isEmpty(coordinate.visualSignature)) {
+            binding.coordinateVisualStatus.setText("未启用（需从冻结画面重新创建）");
+            binding.coordinateVisualStatus.setTextColor(
+                    binding.coordinateActivity.getCurrentTextColor());
+        } else if (VisualCoordinateSignature.isValid(coordinate.visualSignature)) {
+            binding.coordinateVisualStatus.setText("已启用（修改 X/Y 后自动移除）");
+            binding.coordinateVisualStatus.setTextColor(0xff008a00);
+        } else {
+            binding.coordinateVisualStatus.setText("数据无效（运行时将安全跳过）");
+            binding.coordinateVisualStatus.setTextColor(Color.RED);
         }
     }
 

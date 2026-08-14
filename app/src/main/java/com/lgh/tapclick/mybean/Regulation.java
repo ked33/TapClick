@@ -1,5 +1,7 @@
 package com.lgh.tapclick.mybean;
 
+import com.lgh.tapclick.myclass.VisualCoordinateSignature;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -28,6 +30,12 @@ public class Regulation {
                 throw new IllegalArgumentException("导入数据包含空坐标规则：" + appDescribe.appPackage);
             }
             Coordinate coordinate = new Coordinate(sourceCoordinate);
+            if (coordinate.visualSignature != null
+                    && !coordinate.visualSignature.isEmpty()
+                    && !VisualCoordinateSignature.isValid(coordinate.visualSignature)) {
+                throw new IllegalArgumentException(
+                        "导入数据包含无效坐标视觉校验：" + appDescribe.appPackage);
+            }
             coordinate.id = null;
             coordinate.createTime = importTime;
             coordinate.lastTriggerTime = 0;

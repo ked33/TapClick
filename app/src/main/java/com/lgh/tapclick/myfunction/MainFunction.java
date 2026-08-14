@@ -69,6 +69,7 @@ import com.lgh.tapclick.myclass.DataDao;
 import com.lgh.tapclick.myclass.MyApplication;
 import com.lgh.tapclick.myclass.PackageCatalog;
 import com.lgh.tapclick.myclass.RuntimeAppDescribeMap;
+import com.lgh.tapclick.myclass.VisualCoordinateSignature;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
@@ -123,6 +124,10 @@ public class MainFunction {
     private static final Pattern PACKAGE_NAME_PATTERN = Pattern.compile("[A-Za-z0-9_.]+");
     private static final long MANUAL_CAPTURE_BUDGET_MILLIS = 1500L;
     private static final int MANUAL_CAPTURE_MAX_NODES = 5000;
+    private static final int VISUAL_COORDINATE_MAX_ATTEMPTS = 3;
+    private static final long VISUAL_COORDINATE_RETRY_DELAY_MILLIS = 500L;
+    private static final long VISUAL_COORDINATE_SCREENSHOT_INTERVAL_MILLIS = 500L;
+    private static final long VISUAL_COORDINATE_MAX_SCREENSHOT_AGE_MILLIS = 1500L;
 
     private final AccessibilityService service;
     private final WindowManager windowManager;
@@ -141,6 +146,7 @@ public class MainFunction {
     private final SimpleDateFormat simpleDateFormat;
     private final Object serviceInfoLock;
     private final Object pageTaskLock;
+    private final Object coordinateScreenshotLock;
     private final Set<ScheduledFuture<?>> pageTaskFutures;
     private final AtomicLong layoutCaptureGeneration;
     private final AtomicBoolean quickCaptureInProgress;
@@ -164,6 +170,7 @@ public class MainFunction {
     private volatile ScheduledFuture<?> pendingWidgetScan;
     private volatile long pageGeneration;
     private volatile long packageGeneration;
+    private long lastCoordinateScreenshotRequestUptimeMillis;
     private volatile AccessibilityServiceInfo serviceInfo;
     private volatile boolean contentChangeEventsEnabled;
     private volatile boolean runtimeLoggingEnabled;
@@ -217,6 +224,7 @@ public class MainFunction {
         serviceInfoLock = new Object();
         appDescribeMapLock = new Object();
         pageTaskLock = new Object();
+        coordinateScreenshotLock = new Object();
         pageTaskFutures = new HashSet<>();
         layoutCaptureGeneration = new AtomicLong();
         quickCaptureInProgress = new AtomicBoolean(false);
@@ -708,25 +716,222 @@ public class MainFunction {
         schedulePageTask(executorServiceSub, new Runnable() {
             @Override
             public void run() {
-                if (generation != pageGeneration
-                        || !onOffCoordinateSub
-                        || !currentActivity.equals(coordinate.appActivity)
-                        || closed.get()) {
+                if (!isCoordinateExecutionValid(coordinate, generation)) {
                     return;
                 }
-                boolean actionAccepted = click(coordinate.xPosition, coordinate.yPosition);
-                if (clickIndex == 0) {
-                    coordinate.triggerCount += 1;
-                    coordinate.lastTriggerTime = System.currentTimeMillis();
-                    MyApplication.executeDatabase(() -> dataDao.updateCoordinate(coordinate));
-                    addRuleLog("coordinate", coordinate.id, coordinate.appPackage,
-                            coordinate.appActivity, "页面匹配",
-                            actionAccepted ? "手势已提交" : "手势提交失败", coordinate);
+                if (TextUtils.isEmpty(coordinate.visualSignature)) {
+                    performCoordinateClick(coordinate, generation, clickIndex, false);
+                    return;
                 }
-                scheduleCoordinateClick(coordinate, generation, clickIndex + 1,
-                        coordinate.clickInterval <= 0 ? 10 : coordinate.clickInterval);
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                    addCoordinateVisualLog(coordinate, clickIndex, 0, -1,
+                            "skipped", "reason=unsupportedSdk sdk=" + Build.VERSION.SDK_INT);
+                    addRuleLog("coordinate", coordinate.id, coordinate.appPackage,
+                            coordinate.appActivity, "视觉校验",
+                            "系统不支持截图，已跳过", coordinateLogDetails(coordinate));
+                    return;
+                }
+                if (!VisualCoordinateSignature.isValid(coordinate.visualSignature)) {
+                    addCoordinateVisualLog(coordinate, clickIndex, 0, -1,
+                            "skipped", "reason=invalidSignature");
+                    addRuleLog("coordinate", coordinate.id, coordinate.appPackage,
+                            coordinate.appActivity, "视觉校验",
+                            "视觉签名无效，已跳过", coordinateLogDetails(coordinate));
+                    return;
+                }
+                requestCoordinateVisualCheck(coordinate, generation, clickIndex, 1);
             }
         }, Math.max(0, delayMillis));
+    }
+
+    private boolean isCoordinateExecutionValid(Coordinate coordinate, long generation) {
+        return coordinate != null
+                && generation == pageGeneration
+                && onOffCoordinateSub
+                && TextUtils.equals(currentPackage, coordinate.appPackage)
+                && TextUtils.equals(currentActivity, coordinate.appActivity)
+                && !closed.get();
+    }
+
+    private void performCoordinateClick(Coordinate coordinate, long generation,
+                                        int clickIndex, boolean visualVerified) {
+        if (!isCoordinateExecutionValid(coordinate, generation)) {
+            return;
+        }
+        boolean actionAccepted = click(coordinate.xPosition, coordinate.yPosition);
+        if (clickIndex == 0) {
+            coordinate.triggerCount += 1;
+            coordinate.lastTriggerTime = System.currentTimeMillis();
+            MyApplication.executeDatabase(() -> dataDao.updateCoordinate(coordinate));
+            addRuleLog("coordinate", coordinate.id, coordinate.appPackage,
+                    coordinate.appActivity, visualVerified ? "视觉校验通过" : "页面匹配",
+                    actionAccepted ? "手势已提交" : "手势提交失败",
+                    coordinateLogDetails(coordinate));
+        }
+        scheduleCoordinateClick(coordinate, generation, clickIndex + 1,
+                coordinate.clickInterval <= 0 ? 10 : coordinate.clickInterval);
+    }
+
+    @SuppressLint("NewApi")
+    private void requestCoordinateVisualCheck(Coordinate coordinate, long generation,
+                                              int clickIndex, int attempt) {
+        if (!isCoordinateExecutionValid(coordinate, generation)) {
+            return;
+        }
+        long throttleDelay = acquireCoordinateScreenshotDelay();
+        if (throttleDelay > 0) {
+            schedulePageTask(executorServiceSub,
+                    () -> requestCoordinateVisualCheck(
+                            coordinate, generation, clickIndex, attempt),
+                    throttleDelay);
+            return;
+        }
+        long requestStartedUptimeMillis = SystemClock.uptimeMillis();
+        try {
+            service.takeScreenshot(Display.DEFAULT_DISPLAY, executorServiceCapture,
+                    new AccessibilityService.TakeScreenshotCallback() {
+                        @Override
+                        public void onSuccess(
+                                AccessibilityService.ScreenshotResult screenshotResult) {
+                            Bitmap bitmap = copyScreenshotBitmap(screenshotResult);
+                            int score = -1;
+                            if (bitmap != null) {
+                                try {
+                                    if (!isCoordinateExecutionValid(coordinate, generation)) {
+                                        return;
+                                    }
+                                    long screenshotTimestamp = screenshotResult.getTimestamp();
+                                    long screenshotAge = SystemClock.uptimeMillis()
+                                            - screenshotTimestamp;
+                                    if (screenshotTimestamp + 100L
+                                            < requestStartedUptimeMillis
+                                            || screenshotAge < 0L
+                                            || screenshotAge
+                                            > VISUAL_COORDINATE_MAX_SCREENSHOT_AGE_MILLIS) {
+                                        handleCoordinateVisualResult(coordinate, generation,
+                                                clickIndex, attempt, -1,
+                                                "staleScreenshot ageMs=" + screenshotAge);
+                                        return;
+                                    }
+                                    DisplayMetrics metrics = new DisplayMetrics();
+                                    windowManager.getDefaultDisplay().getRealMetrics(metrics);
+                                    VisualRegionSample sample = sampleVisualCoordinateRegion(
+                                            bitmap, coordinate.xPosition, coordinate.yPosition,
+                                            metrics.widthPixels, metrics.heightPixels);
+                                    if (sample != null) {
+                                        score = VisualCoordinateSignature.matchScore(
+                                                coordinate.visualSignature, sample.pixels,
+                                                sample.width, sample.height);
+                                    }
+                                } catch (RuntimeException | OutOfMemoryError ignored) {
+                                    score = -1;
+                                } finally {
+                                    bitmap.recycle();
+                                }
+                            }
+                            if (score < 0) {
+                                handleCoordinateVisualResult(coordinate, generation,
+                                        clickIndex, attempt, score, "captureDecodeFailed");
+                            } else {
+                                handleCoordinateVisualResult(coordinate, generation,
+                                        clickIndex, attempt, score, null);
+                            }
+                        }
+
+                        @Override
+                        public void onFailure(int errorCode) {
+                            handleCoordinateVisualResult(coordinate, generation,
+                                    clickIndex, attempt, -1,
+                                    "screenshotError error=" + errorCode);
+                        }
+                    });
+        } catch (RuntimeException exception) {
+            handleCoordinateVisualResult(coordinate, generation, clickIndex, attempt, -1,
+                    "screenshotException error=" + exception.getClass().getSimpleName());
+        }
+    }
+
+    private long acquireCoordinateScreenshotDelay() {
+        synchronized (coordinateScreenshotLock) {
+            long now = SystemClock.uptimeMillis();
+            if (lastCoordinateScreenshotRequestUptimeMillis > 0) {
+                long elapsed = now - lastCoordinateScreenshotRequestUptimeMillis;
+                if (elapsed < VISUAL_COORDINATE_SCREENSHOT_INTERVAL_MILLIS) {
+                    return VISUAL_COORDINATE_SCREENSHOT_INTERVAL_MILLIS - elapsed;
+                }
+            }
+            lastCoordinateScreenshotRequestUptimeMillis = now;
+            return 0L;
+        }
+    }
+
+    private void handleCoordinateVisualResult(Coordinate coordinate, long generation,
+                                              int clickIndex, int attempt, int score,
+                                              String failureReason) {
+        schedulePageTask(executorServiceSub, () -> {
+            if (!isCoordinateExecutionValid(coordinate, generation)) {
+                return;
+            }
+            boolean matched = failureReason == null
+                    && score >= VisualCoordinateSignature.DEFAULT_MATCH_THRESHOLD;
+            if (matched) {
+                addCoordinateVisualLog(coordinate, clickIndex, attempt, score,
+                        "matched", null);
+                performCoordinateClick(coordinate, generation, clickIndex, true);
+                return;
+            }
+            if (attempt < VISUAL_COORDINATE_MAX_ATTEMPTS) {
+                addCoordinateVisualLog(coordinate, clickIndex, attempt, score,
+                        "retry", failureReason == null ? null : "reason=" + failureReason);
+                schedulePageTask(executorServiceSub,
+                        () -> requestCoordinateVisualCheck(
+                                coordinate, generation, clickIndex, attempt + 1),
+                        VISUAL_COORDINATE_RETRY_DELAY_MILLIS);
+                return;
+            }
+            addCoordinateVisualLog(coordinate, clickIndex, attempt, score,
+                    "skipped", failureReason == null ? null : "reason=" + failureReason);
+            String result = failureReason == null
+                    ? "第" + (clickIndex + 1) + "次点击前未匹配，已跳过"
+                    : "第" + (clickIndex + 1) + "次点击前截图失败，已跳过";
+            addRuleLog("coordinate", coordinate.id, coordinate.appPackage,
+                    coordinate.appActivity, "视觉校验", result,
+                    coordinateLogDetails(coordinate));
+        }, 0L);
+    }
+
+    private void addCoordinateVisualLog(Coordinate coordinate, int clickIndex,
+                                        int attempt, int score, String result,
+                                        String details) {
+        if (!runtimeLoggingEnabled) {
+            return;
+        }
+        StringBuilder builder = new StringBuilder("坐标视觉校验 ruleId=")
+                .append(coordinate.id == null ? "未分配" : coordinate.id)
+                .append(" click=").append(clickIndex + 1)
+                .append(" attempt=").append(attempt)
+                .append(" score=").append(score < 0 ? "不可用" : score)
+                .append(" threshold=")
+                .append(VisualCoordinateSignature.DEFAULT_MATCH_THRESHOLD)
+                .append(" result=").append(result);
+        if (details != null && !details.isEmpty()) {
+            builder.append(' ').append(details);
+        }
+        addLog(builder.toString());
+    }
+
+    private static Map<String, Object> coordinateLogDetails(Coordinate coordinate) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("xPosition", coordinate.xPosition);
+        details.put("yPosition", coordinate.yPosition);
+        details.put("clickDelay", coordinate.clickDelay);
+        details.put("clickInterval", coordinate.clickInterval);
+        details.put("clickNumber", coordinate.clickNumber);
+        details.put("comment", coordinate.comment);
+        details.put("visualVerification", !TextUtils.isEmpty(coordinate.visualSignature));
+        details.put("visualSignatureLength",
+                coordinate.visualSignature == null ? 0 : coordinate.visualSignature.length());
+        return details;
     }
 
     private void scheduleWidgetClick(AccessibilityNodeInfo nodeInfo, Rect rect, Widget widget,
@@ -1010,10 +1215,13 @@ public class MainFunction {
                                 coordinateSelect.appActivity = currentActivity;
                                 coordinateSelect.xPosition = cParams.x + width;
                                 coordinateSelect.yPosition = cParams.y + height;
+                                coordinateSelect.visualSignature = null;
+                                frozenCoordinateSelected = false;
                                 addDataBinding.pkgName.setText(coordinateSelect.appPackage);
                                 addDataBinding.actName.setText(coordinateSelect.appActivity);
                                 addDataBinding.saveAim.setEnabled(pattern.matcher(coordinateSelect.appPackage).matches());
                                 addDataBinding.xy.setText("X轴：" + String.format("%-4d", coordinateSelect.xPosition) + "    " + "Y轴：" + String.format("%-4d", coordinateSelect.yPosition));
+                                addDataBinding.widget.setText("已手动移动坐标，点击前视觉校验未启用");
                                 break;
                             case MotionEvent.ACTION_UP:
                                 cParams.alpha = 0.6f;
@@ -1466,6 +1674,11 @@ public class MainFunction {
         coordinateSelect.appActivity = capture.appActivity;
         coordinateSelect.xPosition = selectedX;
         coordinateSelect.yPosition = selectedY;
+        VisualRegionSample visualSample = sampleVisualCoordinateRegion(
+                capture.bitmap, selectedX, selectedY, bParams.width, bParams.height);
+        coordinateSelect.visualSignature = visualSample == null
+                ? null : VisualCoordinateSignature.create(
+                        visualSample.pixels, visualSample.width, visualSample.height);
         Widget widgetSelect = activeWidgetSelection;
         if (widgetSelect != null) {
             widgetSelect.widgetClickable = false;
@@ -1479,15 +1692,57 @@ public class MainFunction {
         currentAddBinding.actName.setText(coordinateSelect.appActivity);
         currentAddBinding.xy.setText("X轴：" + String.format("%-4d", selectedX)
                 + "    Y轴：" + String.format("%-4d", selectedY));
-        currentAddBinding.saveAim.setEnabled(
-                PACKAGE_NAME_PATTERN.matcher(coordinateSelect.appPackage).matches());
+        boolean visualVerificationEnabled =
+                VisualCoordinateSignature.isValid(coordinateSelect.visualSignature);
+        currentAddBinding.saveAim.setEnabled(visualVerificationEnabled
+                && PACKAGE_NAME_PATTERN.matcher(coordinateSelect.appPackage).matches());
         currentAddBinding.saveWid.setEnabled(false);
-        currentAddBinding.widget.setText("已从冻结画面选择坐标，可点击“添加坐标”保存");
+        currentAddBinding.widget.setText(visualVerificationEnabled
+                ? "已从冻结画面选择坐标，并启用点击前视觉校验"
+                : "目标区域特征不足，无法安全校验，请重新选择坐标");
         frozenCoordinateSelected = true;
         showFrozenCoordinateMarker(currentWidgetBinding, selectedX, selectedY);
         addCaptureLog("frozenSelect", capture.appPackage, true,
                 elapsedMillis(capture.requestStartedNanos),
-                "x=" + selectedX + " y=" + selectedY);
+                "x=" + selectedX + " y=" + selectedY
+                        + " visual=" + visualVerificationEnabled
+                        + (visualSample == null ? "" : " region="
+                                + visualSample.width + "x" + visualSample.height));
+    }
+
+    private static VisualRegionSample sampleVisualCoordinateRegion(
+            Bitmap bitmap, int screenX, int screenY, int screenWidth, int screenHeight) {
+        if (bitmap == null || bitmap.isRecycled()) {
+            return null;
+        }
+        int bitmapWidth = bitmap.getWidth();
+        int bitmapHeight = bitmap.getHeight();
+        int bitmapX = mapScreenCoordinate(screenX, screenWidth, bitmapWidth);
+        int bitmapY = mapScreenCoordinate(screenY, screenHeight, bitmapHeight);
+        VisualCoordinateSignature.Region region = VisualCoordinateSignature.calculateRegion(
+                bitmapWidth, bitmapHeight, bitmapX, bitmapY);
+        if (region == null) {
+            return null;
+        }
+        try {
+            int[] pixels = new int[region.getWidth() * region.getHeight()];
+            bitmap.getPixels(pixels, 0, region.getWidth(),
+                    region.getLeft(), region.getTop(), region.getWidth(), region.getHeight());
+            return new VisualRegionSample(pixels, region.getWidth(), region.getHeight());
+        } catch (RuntimeException | OutOfMemoryError ignored) {
+            return null;
+        }
+    }
+
+    private static int mapScreenCoordinate(int coordinate, int screenSize, int bitmapSize) {
+        if (bitmapSize <= 1) {
+            return 0;
+        }
+        if (screenSize <= 1) {
+            return Math.max(0, Math.min(coordinate, bitmapSize - 1));
+        }
+        int clampedCoordinate = Math.max(0, Math.min(coordinate, screenSize - 1));
+        return (int) ((long) clampedCoordinate * (bitmapSize - 1) / (screenSize - 1));
     }
 
     private void showFrozenCoordinateMarker(ViewWidgetSelectBinding binding, int x, int y) {
@@ -2403,6 +2658,18 @@ public class MainFunction {
                 details.append(" failure=").append(failure);
             }
             return details.toString();
+        }
+    }
+
+    private static final class VisualRegionSample {
+        private final int[] pixels;
+        private final int width;
+        private final int height;
+
+        private VisualRegionSample(int[] pixels, int width, int height) {
+            this.pixels = pixels;
+            this.width = width;
+            this.height = height;
         }
     }
 

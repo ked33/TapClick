@@ -13,6 +13,7 @@ import com.lgh.tapclick.mybean.Regulation;
 import com.lgh.tapclick.mybean.Widget;
 import com.lgh.tapclick.myclass.AccessibilityLayoutSnapshot;
 import com.lgh.tapclick.myclass.RuntimeAppDescribeMap;
+import com.lgh.tapclick.myclass.VisualCoordinateSignature;
 import com.lgh.tapclick.myfunction.RuntimeLogFormatter;
 import com.lgh.tapclick.myfunction.WidgetScanPolicy;
 
@@ -66,6 +67,14 @@ public class RuleIntegrityTest {
         widget.widgetText = "跳过";
         widget.triggerCount = 8;
         source.widgetList.add(widget);
+        Coordinate coordinate = new Coordinate();
+        coordinate.id = 300L;
+        coordinate.appPackage = "example.package";
+        coordinate.appActivity = "example.Activity";
+        coordinate.triggerCount = 5;
+        coordinate.visualSignature = VisualCoordinateSignature.create(
+                createVisualPattern(64, 64), 64, 64);
+        source.coordinateList.add(coordinate);
 
         Regulation imported = new Regulation(source, 1234L);
 
@@ -74,6 +83,12 @@ public class RuleIntegrityTest {
         assertNull(imported.widgetList.get(0).id);
         assertEquals(0, imported.widgetList.get(0).triggerCount);
         assertEquals(1234L, imported.widgetList.get(0).createTime);
+        assertEquals(1, imported.coordinateList.size());
+        assertNull(imported.coordinateList.get(0).id);
+        assertEquals(0, imported.coordinateList.get(0).triggerCount);
+        assertEquals(1234L, imported.coordinateList.get(0).createTime);
+        assertEquals(coordinate.visualSignature,
+                imported.coordinateList.get(0).visualSignature);
     }
 
     @Test
@@ -324,5 +339,137 @@ public class RuleIntegrityTest {
         assertTrue(summary.contains("elapsedMs=187"));
         assertTrue(summary.contains("visited=42"));
         assertFalse(summary.contains("AccessibilityNodeInfo"));
+    }
+
+    @Test
+    public void visualCoordinateSignatureMatchesStableAndModeratelyChangedRegions() {
+        int width = 64;
+        int height = 64;
+        int[] original = createVisualPattern(width, height);
+        String signature = VisualCoordinateSignature.create(original, width, height);
+
+        assertNotNull(signature);
+        assertTrue(VisualCoordinateSignature.isValid(signature));
+        assertEquals(100, VisualCoordinateSignature.matchScore(
+                signature, original, width, height));
+
+        int brightnessScore = VisualCoordinateSignature.matchScore(
+                signature, adjustBrightness(original, 24), width, height);
+        int noiseScore = VisualCoordinateSignature.matchScore(
+                signature, addDeterministicNoise(original), width, height);
+
+        assertTrue(brightnessScore >= VisualCoordinateSignature.DEFAULT_MATCH_THRESHOLD);
+        assertTrue(noiseScore >= VisualCoordinateSignature.DEFAULT_MATCH_THRESHOLD);
+    }
+
+    @Test
+    public void visualCoordinateSignatureRejectsUnrelatedOrMalformedRegions() {
+        int width = 64;
+        int height = 64;
+        int[] original = createVisualPattern(width, height);
+        String signature = VisualCoordinateSignature.create(original, width, height);
+        int[] unrelated = createCheckerboard(width, height);
+        int[] flat = new int[width * height];
+        Arrays.fill(flat, 0xff808080);
+
+        assertNotNull(signature);
+        assertTrue(VisualCoordinateSignature.matchScore(
+                signature, unrelated, width, height)
+                < VisualCoordinateSignature.DEFAULT_MATCH_THRESHOLD);
+        assertNull(VisualCoordinateSignature.create(flat, width, height));
+        assertFalse(VisualCoordinateSignature.isValid("v1:00"));
+        assertFalse(VisualCoordinateSignature.isValid(signature + "00"));
+        assertEquals(-1, VisualCoordinateSignature.matchScore(
+                "unsupported:" + signature, original, width, height));
+    }
+
+    @Test
+    public void visualCoordinateRegionStaysInsideScreenAtEdges() {
+        VisualCoordinateSignature.Region topLeft =
+                VisualCoordinateSignature.calculateRegion(1080, 2400, 0, 0);
+        VisualCoordinateSignature.Region bottomRight =
+                VisualCoordinateSignature.calculateRegion(1080, 2400, 1079, 2399);
+
+        assertNotNull(topLeft);
+        assertNotNull(bottomRight);
+        assertEquals(0, topLeft.getLeft());
+        assertEquals(0, topLeft.getTop());
+        assertEquals(1080, bottomRight.getLeft() + bottomRight.getWidth());
+        assertEquals(2400, bottomRight.getTop() + bottomRight.getHeight());
+        assertTrue(topLeft.getWidth() >= 48);
+        assertTrue(topLeft.getWidth() <= 112);
+    }
+
+    @Test
+    public void coordinateCopyPreservesVisualVerificationWithoutExposingSignature() {
+        Coordinate source = new Coordinate();
+        source.visualSignature = VisualCoordinateSignature.create(
+                createVisualPattern(64, 64), 64, 64);
+
+        Coordinate copy = new Coordinate(source);
+
+        assertEquals(source.visualSignature, copy.visualSignature);
+        assertTrue(copy.toString().contains("visualVerification=true"));
+        assertFalse(copy.toString().contains(source.visualSignature));
+    }
+
+    @Test
+    public void regulationImportRejectsMalformedVisualCoordinateSignature() {
+        Regulation source = new Regulation();
+        source.appDescribe = new AppDescribe();
+        source.appDescribe.appPackage = "example.package";
+        Coordinate coordinate = new Coordinate();
+        coordinate.appPackage = source.appDescribe.appPackage;
+        coordinate.appActivity = "example.Activity";
+        coordinate.visualSignature = "v1:00";
+        source.coordinateList.add(coordinate);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> new Regulation(source, 1234L));
+    }
+
+    private static int[] createVisualPattern(int width, int height) {
+        int[] pixels = new int[width * height];
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int value = 24 + (x * 2 + y * 3 + ((x / 8 + y / 8) % 2) * 48) % 176;
+                pixels[y * width + x] = grayscale(value);
+            }
+        }
+        return pixels;
+    }
+
+    private static int[] createCheckerboard(int width, int height) {
+        int[] pixels = new int[width * height];
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int value = ((x / 4 + y / 4) & 1) == 0 ? 18 : 238;
+                pixels[y * width + x] = grayscale(value);
+            }
+        }
+        return pixels;
+    }
+
+    private static int[] adjustBrightness(int[] source, int adjustment) {
+        int[] result = source.clone();
+        for (int i = 0; i < result.length; i++) {
+            int value = Math.max(0, Math.min(255, (result[i] & 0xff) + adjustment));
+            result[i] = grayscale(value);
+        }
+        return result;
+    }
+
+    private static int[] addDeterministicNoise(int[] source) {
+        int[] result = source.clone();
+        for (int i = 0; i < result.length; i++) {
+            int noise = (i * 17 % 13) - 6;
+            int value = Math.max(0, Math.min(255, (result[i] & 0xff) + noise));
+            result[i] = grayscale(value);
+        }
+        return result;
+    }
+
+    private static int grayscale(int value) {
+        return 0xff000000 | (value << 16) | (value << 8) | value;
     }
 }
