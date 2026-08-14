@@ -1,13 +1,35 @@
 apply plugin: 'com.android.application'
 
+def baseVersionCode = 106
+def baseVersionName = "10.6"
+def ciVersionCodeValue = System.getenv("CI_VERSION_CODE")?.trim()
+def ciVersionNameValue = System.getenv("CI_VERSION_NAME")?.trim()
+
+if ((ciVersionCodeValue && !ciVersionNameValue) || (!ciVersionCodeValue && ciVersionNameValue)) {
+    throw new GradleException("CI_VERSION_CODE and CI_VERSION_NAME must be provided together")
+}
+
+def resolvedVersionCode = baseVersionCode
+if (ciVersionCodeValue) {
+    try {
+        resolvedVersionCode = Integer.parseInt(ciVersionCodeValue)
+    } catch (NumberFormatException exception) {
+        throw new GradleException("CI_VERSION_CODE must be a decimal integer", exception)
+    }
+    if (resolvedVersionCode <= baseVersionCode || resolvedVersionCode > 2100000000) {
+        throw new GradleException("CI_VERSION_CODE must be greater than the base version and within Android's limit")
+    }
+}
+def resolvedVersionName = ciVersionNameValue ?: baseVersionName
+
 android {
     defaultConfig {
         applicationId "com.lgh.tapclick"
         compileSdk 36
         minSdkVersion 24
         targetSdkVersion 36
-        versionCode 106
-        versionName "10.6"
+        versionCode resolvedVersionCode
+        versionName resolvedVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         javaCompileOptions {
             annotationProcessorOptions {

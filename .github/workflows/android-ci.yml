@@ -3,14 +3,9 @@ name: Android CI
 on:
   push:
     branches: [master, main]
-    tags: ["v*"]
   pull_request:
     branches: [master, main]
   workflow_dispatch:
-
-concurrency:
-  group: android-ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -74,14 +69,6 @@ jobs:
             --build-cache \
             -Dorg.gradle.jvmargs="-Xmx3072m -Dfile.encoding=UTF-8"
 
-      - name: Upload verification APKs
-        uses: actions/upload-artifact@v4
-        with:
-          name: TapClick-verification-apks
-          path: app/build/outputs/apk/**/*.apk
-          if-no-files-found: error
-          retention-days: 14
-
       - name: Upload generated Room schemas
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -93,7 +80,7 @@ jobs:
 
   release:
     name: Sign and publish universal APK
-    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main') }}
     needs: verify
     runs-on: ubuntu-latest
     permissions:
@@ -135,14 +122,32 @@ jobs:
               exit 1
             fi
           done
-          VERSION_NAME=$(grep -E 'versionName\s+"' app/build.gradle | head -1 | sed -E 's/.*versionName[[:space:]]+"([^"]+)".*/\1/')
-          VERSION_CODE=$(grep -E 'versionCode\s+' app/build.gradle | head -1 | sed -E 's/.*versionCode[[:space:]]+([0-9]+).*/\1/')
-          if [ "${GITHUB_REF_NAME}" != "v${VERSION_NAME}" ]; then
-            echo "Tag ${GITHUB_REF_NAME} does not match versionName ${VERSION_NAME}" >&2
+          BASE_VERSION_NAME=$(sed -nE 's/^def baseVersionName = "([^"]+)"/\1/p' app/build.gradle | head -1)
+          BASE_VERSION_CODE=$(sed -nE 's/^def baseVersionCode = ([0-9]+)/\1/p' app/build.gradle | head -1)
+          if ! [[ "$BASE_VERSION_CODE" =~ ^[0-9]+$ ]] || [ -z "$BASE_VERSION_NAME" ]; then
+            echo "Unable to read base version metadata from app/build.gradle" >&2
             exit 1
           fi
-          echo "name=${VERSION_NAME}" >> "$GITHUB_OUTPUT"
-          echo "code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          if ! [[ "$GITHUB_RUN_NUMBER" =~ ^[0-9]+$ ]] || [ "$GITHUB_RUN_NUMBER" -ge 100000 ]; then
+            echo "GITHUB_RUN_NUMBER must be an integer below 100000" >&2
+            exit 1
+          fi
+          CI_VERSION_CODE=$((BASE_VERSION_CODE * 100000 + GITHUB_RUN_NUMBER))
+          if [ "$CI_VERSION_CODE" -gt 2100000000 ]; then
+            echo "Computed versionCode exceeds Android's limit" >&2
+            exit 1
+          fi
+          CI_VERSION_NAME="${BASE_VERSION_NAME}-build.${GITHUB_RUN_NUMBER}"
+          {
+            echo "base_name=${BASE_VERSION_NAME}"
+            echo "name=${CI_VERSION_NAME}"
+            echo "code=${CI_VERSION_CODE}"
+            echo "tag=build-${GITHUB_RUN_NUMBER}"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "CI_VERSION_CODE=${CI_VERSION_CODE}"
+            echo "CI_VERSION_NAME=${CI_VERSION_NAME}"
+          } >> "$GITHUB_ENV"
           printf '%s' "$SIGNING_KEYSTORE_BASE64" | base64 --decode > "${RUNNER_TEMP}/tapclick-release.jks"
           echo "KEYSTORE_FILE=${RUNNER_TEMP}/tapclick-release.jks" >> "$GITHUB_ENV"
 
@@ -164,12 +169,28 @@ jobs:
           SIGNING_CERT_SHA256: ${{ secrets.SIGNING_CERT_SHA256 }}
         run: |
           mkdir -p dist
-          SRC=$(find app/build/outputs/apk/release -type f -name "*.apk" | head -1)
-          if [ -z "$SRC" ]; then
-            echo "No release APK found" >&2
+          METADATA="app/build/outputs/apk/release/output-metadata.json"
+          if [ ! -f "$METADATA" ]; then
+            echo "Release output metadata is missing" >&2
             exit 1
           fi
-          DEST="dist/TapClick-v${{ steps.version.outputs.name }}-universal.apk"
+          ACTUAL_VERSION_CODE=$(jq -r '.elements[0].versionCode // empty' "$METADATA")
+          ACTUAL_VERSION_NAME=$(jq -r '.elements[0].versionName // empty' "$METADATA")
+          if [ "$ACTUAL_VERSION_CODE" != "$CI_VERSION_CODE" ] || [ "$ACTUAL_VERSION_NAME" != "$CI_VERSION_NAME" ]; then
+            echo "Release version metadata does not match the requested CI version" >&2
+            exit 1
+          fi
+          mapfile -t APKS < <(find app/build/outputs/apk/release -maxdepth 1 -type f -name "*.apk")
+          if [ "${#APKS[@]}" -ne 1 ]; then
+            echo "Expected exactly one release APK, found ${#APKS[@]}" >&2
+            exit 1
+          fi
+          SRC="${APKS[0]}"
+          if [[ "$SRC" == *unsigned* ]]; then
+            echo "Refusing to publish an unsigned APK" >&2
+            exit 1
+          fi
+          DEST="dist/TapClick-${{ steps.version.outputs.name }}-universal.apk"
           cp "$SRC" "$DEST"
           APKSIGNER="${ANDROID_HOME}/build-tools/36.0.0/apksigner"
           "$APKSIGNER" verify --verbose --print-certs "$DEST"
@@ -179,13 +200,14 @@ jobs:
             echo "Release signing certificate fingerprint mismatch" >&2
             exit 1
           fi
-          sha256sum "$DEST" > "${DEST}.sha256"
+          APK_FILE=$(basename "$DEST")
+          (cd dist && sha256sum "$APK_FILE" > "${APK_FILE}.sha256")
           echo "apk=${DEST}" >> "$GITHUB_OUTPUT"
 
       - name: Upload signed release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TapClick-release-universal
+          name: TapClick-${{ steps.version.outputs.name }}-release
           path: dist/*
           if-no-files-found: error
           retention-days: 30
@@ -193,18 +215,23 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: TapClick ${{ steps.version.outputs.name }}
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: TapClick ${{ steps.version.outputs.base_name }} build ${{ github.run_number }}
           body: |
-            ## TapClick ${{ steps.version.outputs.name }} (versionCode ${{ steps.version.outputs.code }})
+            ## TapClick ${{ steps.version.outputs.name }}
 
             - APK: universal
-            - Build: `${{ github.sha }}`
+            - versionCode: `${{ steps.version.outputs.code }}`
+            - Commit: `${{ github.sha }}`
+            - Actions: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
             - Signature and SHA-256 checksum verified by CI
           files: dist/*
           draft: false
           prerelease: false
           generate_release_notes: true
           make_latest: true
+          overwrite_files: true
           fail_on_unmatched_files: true
 
       - name: Remove temporary keystore
