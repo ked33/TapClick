@@ -107,6 +107,9 @@ public class MainFunction {
     private static final long QUICK_CAPTURE_PANEL_TIMEOUT_MILLIS = 250L;
     private static final long QUICK_CAPTURE_BUDGET_MILLIS = 180L;
     private static final int QUICK_CAPTURE_MAX_NODES = 400;
+    private static final long QUICK_CAPTURE_MODULE_RETRY_MILLIS = 700L;
+    private static final long QUICK_CAPTURE_WINDOW_FALLBACK_MILLIS = 1200L;
+    private static final int QUICK_CAPTURE_FALLBACK_MAX_NODES = 1200;
     private static final long MANUAL_CAPTURE_BUDGET_MILLIS = 1500L;
     private static final int MANUAL_CAPTURE_MAX_NODES = 5000;
 
@@ -1250,14 +1253,14 @@ public class MainFunction {
             }
             if (panelShown.compareAndSet(false, true)) {
                 mainHandler.removeCallbacks(fallback);
-                if (snapshot == null || snapshot.isEmpty()) {
+                if (snapshot == null || !snapshot.hasSelectableContent()) {
                     showQuickCapturePanel(null, packageAtRequest, "empty", requestStartedNanos);
                 } else {
                     showQuickCapturePanel(snapshot, packageAtRequest, "snapshot", requestStartedNanos);
                 }
                 return;
             }
-            if (snapshot != null && !snapshot.isEmpty()) {
+            if (snapshot != null && snapshot.hasSelectableContent()) {
                 renderQuickCapturedLayout(snapshot, captureGeneration);
             }
         });
@@ -1284,7 +1287,7 @@ public class MainFunction {
                 return;
             }
             requestedAddBinding.switchWid.setEnabled(true);
-            if (snapshot == null || snapshot.isEmpty()) {
+            if (snapshot == null || !snapshot.hasSelectableContent()) {
                 requestedAddBinding.switchWid.setText("显示布局");
                 Toast.makeText(service, "未捕获到当前页面控件，请重试", Toast.LENGTH_SHORT).show();
                 return;
@@ -1310,6 +1313,8 @@ public class MainFunction {
                 trace.elapsedMillis = elapsedMillis(trace.startedNanos);
                 trace.capturedNodes = capturedSnapshot == null
                         ? 0 : capturedSnapshot.getNodes().size();
+                trace.selectable = capturedSnapshot != null
+                        && capturedSnapshot.hasSelectableContent();
                 addCaptureLog("complete", packageAtRequest, quick,
                         trace.elapsedMillis, trace.toDetails());
                 AccessibilityLayoutSnapshot snapshot = capturedSnapshot;
@@ -1329,13 +1334,17 @@ public class MainFunction {
             trace.failure = "closed";
             return null;
         }
+        trace.moduleEnabled = MyUtils.isModuleValid();
         AccessibilityNodeInfo activeRoot;
+        long rootLookupStartedNanos = System.nanoTime();
         try {
             activeRoot = service.getRootInActiveWindow();
         } catch (RuntimeException exception) {
+            trace.rootLookupMillis = elapsedMillis(rootLookupStartedNanos);
             trace.failure = "activeRoot:" + exception.getClass().getSimpleName();
             return null;
         }
+        trace.rootLookupMillis = elapsedMillis(rootLookupStartedNanos);
         if (activeRoot == null || activeRoot.getPackageName() == null) {
             trace.failure = "activeRootUnavailable";
             return null;
@@ -1350,46 +1359,65 @@ public class MainFunction {
         String capturedActivity = StrUtil.isNotBlank(activityAtRequest)
                 ? activityAtRequest : currentActivity;
         List<AccessibilityLayoutSnapshot.Node> capturedNodes = new ArrayList<>();
-        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(
-                quick ? QUICK_CAPTURE_BUDGET_MILLIS : MANUAL_CAPTURE_BUDGET_MILLIS);
-        int maxNodes = quick ? QUICK_CAPTURE_MAX_NODES : MANUAL_CAPTURE_MAX_NODES;
         if (quick) {
             trace.source = "activeRoot";
-            appendCapturedNodes(activeRoot, capturedNodes, deadlineNanos, maxNodes, trace, false);
-        } else {
-            List<AccessibilityWindowInfo> windows = new ArrayList<>();
-            try {
-                List<AccessibilityWindowInfo> serviceWindows = service.getWindows();
-                if (serviceWindows != null) {
-                    windows.addAll(serviceWindows);
+            long activeTraversalStartedNanos = System.nanoTime();
+            appendCapturedNodes(activeRoot, capturedNodes,
+                    System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(QUICK_CAPTURE_BUDGET_MILLIS),
+                    QUICK_CAPTURE_MAX_NODES, trace, false);
+            capturedNodes = normalizeCapturedNodes(capturedNodes);
+            trace.activeTraversalMillis = elapsedMillis(activeTraversalStartedNanos);
+
+            if (requiresCaptureEnrichment(capturedNodes) && trace.moduleEnabled) {
+                List<AccessibilityLayoutSnapshot.Node> moduleNodes = new ArrayList<>();
+                long moduleTraversalStartedNanos = System.nanoTime();
+                appendCapturedNodes(activeRoot, moduleNodes,
+                        System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(
+                                QUICK_CAPTURE_MODULE_RETRY_MILLIS),
+                        QUICK_CAPTURE_FALLBACK_MAX_NODES, trace, true);
+                moduleNodes = normalizeCapturedNodes(moduleNodes);
+                trace.moduleTraversalMillis = elapsedMillis(moduleTraversalStartedNanos);
+                if (capturedNodeQuality(moduleNodes) >= capturedNodeQuality(capturedNodes)) {
+                    capturedNodes = moduleNodes;
+                    trace.source = "activeRootModuleRetry";
                 }
-            } catch (RuntimeException exception) {
-                trace.failure = "windows:" + exception.getClass().getSimpleName();
             }
-            trace.windowCount = windows.size();
-            Collections.reverse(windows);
-            for (AccessibilityWindowInfo window : windows) {
-                if (System.nanoTime() >= deadlineNanos || capturedNodes.size() >= maxNodes) {
-                    break;
+
+            if (requiresCaptureEnrichment(capturedNodes)) {
+                List<AccessibilityLayoutSnapshot.Node> windowNodes = captureMatchingWindows(
+                        capturedPackage,
+                        QUICK_CAPTURE_WINDOW_FALLBACK_MILLIS,
+                        QUICK_CAPTURE_FALLBACK_MAX_NODES,
+                        trace,
+                        trace.moduleEnabled);
+                if (capturedNodeQuality(windowNodes) >= capturedNodeQuality(capturedNodes)) {
+                    capturedNodes = windowNodes;
+                    trace.source = "quickWindowsFallback";
                 }
-                try {
-                    AccessibilityNodeInfo windowRoot = window.getRoot();
-                    if (windowRoot == null
-                            || !TextUtils.equals(windowRoot.getPackageName(), capturedPackage)) {
-                        continue;
-                    }
-                    trace.source = "windows";
-                    appendCapturedNodes(windowRoot, capturedNodes, deadlineNanos,
-                            maxNodes, trace, true);
-                } catch (RuntimeException exception) {
-                    trace.failure = "windowRoot:" + exception.getClass().getSimpleName();
-                }
+            }
+        } else {
+            capturedNodes = captureMatchingWindows(
+                    capturedPackage,
+                    MANUAL_CAPTURE_BUDGET_MILLIS,
+                    MANUAL_CAPTURE_MAX_NODES,
+                    trace,
+                    trace.moduleEnabled);
+            if (!capturedNodes.isEmpty()) {
+                trace.source = "windows";
             }
         }
         if (capturedNodes.isEmpty()) {
             trace.source = "activeRootFallback";
-            appendCapturedNodes(activeRoot, capturedNodes, deadlineNanos,
-                    maxNodes, trace, false);
+            long activeTraversalStartedNanos = System.nanoTime();
+            appendCapturedNodes(activeRoot, capturedNodes,
+                    System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(
+                            quick ? QUICK_CAPTURE_WINDOW_FALLBACK_MILLIS
+                                    : MANUAL_CAPTURE_BUDGET_MILLIS),
+                    quick ? QUICK_CAPTURE_FALLBACK_MAX_NODES : MANUAL_CAPTURE_MAX_NODES,
+                    trace,
+                    trace.moduleEnabled);
+            capturedNodes = normalizeCapturedNodes(capturedNodes);
+            trace.activeTraversalMillis += elapsedMillis(activeTraversalStartedNanos);
         }
         if (capturedNodes.isEmpty()) {
             if (trace.failure == null) {
@@ -1400,6 +1428,63 @@ public class MainFunction {
 
         return new AccessibilityLayoutSnapshot(
                 capturedPackage, capturedActivity, capturedNodes);
+    }
+
+    private List<AccessibilityLayoutSnapshot.Node> captureMatchingWindows(
+            String capturedPackage, long budgetMillis, int maxNodes,
+            CaptureTrace trace, boolean includeModuleQuery) {
+        List<AccessibilityWindowInfo> windows = new ArrayList<>();
+        long windowLookupStartedNanos = System.nanoTime();
+        try {
+            List<AccessibilityWindowInfo> serviceWindows = service.getWindows();
+            if (serviceWindows != null) {
+                windows.addAll(serviceWindows);
+            }
+        } catch (RuntimeException exception) {
+            trace.failure = "windows:" + exception.getClass().getSimpleName();
+        }
+        trace.windowLookupMillis += elapsedMillis(windowLookupStartedNanos);
+        trace.windowCount = Math.max(trace.windowCount, windows.size());
+
+        List<AccessibilityLayoutSnapshot.Node> capturedNodes = new ArrayList<>();
+        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(budgetMillis);
+        long windowTraversalStartedNanos = System.nanoTime();
+        Collections.reverse(windows);
+        for (AccessibilityWindowInfo window : windows) {
+            if (System.nanoTime() >= deadlineNanos || capturedNodes.size() >= maxNodes) {
+                break;
+            }
+            try {
+                AccessibilityNodeInfo windowRoot = window.getRoot();
+                if (windowRoot == null
+                        || !TextUtils.equals(windowRoot.getPackageName(), capturedPackage)) {
+                    continue;
+                }
+                trace.matchedWindowCount++;
+                appendCapturedNodes(windowRoot, capturedNodes, deadlineNanos,
+                        maxNodes, trace, includeModuleQuery);
+            } catch (RuntimeException exception) {
+                trace.failure = "windowRoot:" + exception.getClass().getSimpleName();
+            }
+        }
+        trace.windowTraversalMillis += elapsedMillis(windowTraversalStartedNanos);
+        return normalizeCapturedNodes(capturedNodes);
+    }
+
+    private static List<AccessibilityLayoutSnapshot.Node> normalizeCapturedNodes(
+            List<AccessibilityLayoutSnapshot.Node> nodes) {
+        return new ArrayList<>(new AccessibilityLayoutSnapshot("", "", nodes).getNodes());
+    }
+
+    private static int capturedNodeQuality(List<AccessibilityLayoutSnapshot.Node> nodes) {
+        AccessibilityLayoutSnapshot snapshot = new AccessibilityLayoutSnapshot("", "", nodes);
+        return (snapshot.hasSelectableContent() ? 100_000 : 0) + snapshot.getNodes().size();
+    }
+
+    private static boolean requiresCaptureEnrichment(
+            List<AccessibilityLayoutSnapshot.Node> nodes) {
+        AccessibilityLayoutSnapshot snapshot = new AccessibilityLayoutSnapshot("", "", nodes);
+        return snapshot.getNodes().size() <= 1 && !snapshot.hasSelectableContent();
     }
 
     private void appendCapturedNodes(AccessibilityNodeInfo root,
@@ -1414,7 +1499,7 @@ public class MainFunction {
         ArrayDeque<AccessibilityNodeInfo> pendingNodes = new ArrayDeque<>();
         Set<AccessibilityNodeInfo> visitedNodes = Collections.newSetFromMap(new IdentityHashMap<>());
         pendingNodes.offer(root);
-        if (includeModuleQuery && MyUtils.isModuleValid()) {
+        if (includeModuleQuery) {
             try {
                 for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText(null)) {
                     if (System.nanoTime() >= deadlineNanos || pendingNodes.size() >= maxNodes * 2) {
@@ -1422,9 +1507,11 @@ public class MainFunction {
                     }
                     if (node != null) {
                         pendingNodes.offer(node);
+                        trace.moduleQueryNodes++;
                     }
                 }
             } catch (RuntimeException ignored) {
+                trace.moduleQueryFailures++;
                 // Fall back to the regular child traversal below.
             }
         }
@@ -1457,11 +1544,16 @@ public class MainFunction {
                             bounds.bottom));
                 }
             } catch (RuntimeException ignored) {
+                trace.nodeReadFailures++;
                 // A node can become stale while its page is being dismissed.
                 // Keep the properties already copied from the remaining nodes.
             }
             try {
-                for (int childIndex = 0; childIndex < node.getChildCount(); childIndex++) {
+                int childCount = node.getChildCount();
+                if (trace.rootChildCount < 0) {
+                    trace.rootChildCount = childCount;
+                }
+                for (int childIndex = 0; childIndex < childCount; childIndex++) {
                     if (System.nanoTime() >= deadlineNanos || pendingNodes.size() >= maxNodes * 2) {
                         break;
                     }
@@ -1471,6 +1563,7 @@ public class MainFunction {
                     }
                 }
             } catch (RuntimeException ignored) {
+                trace.childReadFailures++;
                 // The copied properties remain valid even if child lookup fails.
             }
         }
@@ -1478,7 +1571,8 @@ public class MainFunction {
 
     private void renderQuickCapturedLayout(AccessibilityLayoutSnapshot snapshot,
                                            long captureGeneration) {
-        if (closed.get()
+        if (!snapshot.hasSelectableContent()
+                || closed.get()
                 || captureGeneration != layoutCaptureGeneration.get()
                 || addDataBinding == null
                 || widgetSelectBinding == null
@@ -1641,18 +1735,44 @@ public class MainFunction {
 
     private static final class CaptureTrace {
         private final long startedNanos = System.nanoTime();
+        private boolean moduleEnabled;
         private int windowCount;
+        private int matchedWindowCount;
         private int visitedNodes;
         private int capturedNodes;
+        private boolean selectable;
+        private int rootChildCount = -1;
+        private int moduleQueryNodes;
+        private int moduleQueryFailures;
+        private int nodeReadFailures;
+        private int childReadFailures;
         private String source = "none";
         private String failure;
         private long elapsedMillis;
+        private long rootLookupMillis;
+        private long activeTraversalMillis;
+        private long moduleTraversalMillis;
+        private long windowLookupMillis;
+        private long windowTraversalMillis;
 
         private String toDetails() {
             return "source=" + source
+                    + " module=" + moduleEnabled
+                    + " rootMs=" + rootLookupMillis
+                    + " activeMs=" + activeTraversalMillis
+                    + " moduleMs=" + moduleTraversalMillis
+                    + " windowLookupMs=" + windowLookupMillis
+                    + " windowMs=" + windowTraversalMillis
                     + " windows=" + windowCount
+                    + " matchedWindows=" + matchedWindowCount
+                    + " rootChildren=" + rootChildCount
                     + " visited=" + visitedNodes
                     + " nodes=" + capturedNodes
+                    + " selectable=" + selectable
+                    + " moduleNodes=" + moduleQueryNodes
+                    + " moduleErrors=" + moduleQueryFailures
+                    + " nodeErrors=" + nodeReadFailures
+                    + " childErrors=" + childReadFailures
                     + (failure == null ? "" : " failure=" + failure);
         }
     }

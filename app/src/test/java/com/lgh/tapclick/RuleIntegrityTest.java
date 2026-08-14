@@ -161,6 +161,8 @@ public class RuleIntegrityTest {
                 false, 1L, "small", "", "", 0, 0, 10, 10));
         source.add(new AccessibilityLayoutSnapshot.Node(
                 true, 2L, "large", "跳过", "跳过广告", 0, 0, 30, 20));
+        source.add(new AccessibilityLayoutSnapshot.Node(
+                true, 2L, "large", "跳过", "跳过广告", 0, 0, 30, 20));
 
         AccessibilityLayoutSnapshot snapshot = new AccessibilityLayoutSnapshot(
                 "example.app", "example.AdActivity", source);
@@ -174,6 +176,21 @@ public class RuleIntegrityTest {
         assertThrows(UnsupportedOperationException.class,
                 () -> snapshot.getNodes().add(new AccessibilityLayoutSnapshot.Node(
                         false, 3L, "", "", "", 0, 0, 1, 1)));
+    }
+
+    @Test
+    public void singleEmptyRootIsNotTreatedAsSelectableLayout() {
+        AccessibilityLayoutSnapshot placeholder = new AccessibilityLayoutSnapshot(
+                "example.app", "example.Activity", Collections.singletonList(
+                new AccessibilityLayoutSnapshot.Node(
+                        false, 1L, "android:id/content", "", "", 0, 0, 1080, 2400)));
+        AccessibilityLayoutSnapshot button = new AccessibilityLayoutSnapshot(
+                "example.app", "example.Activity", Collections.singletonList(
+                new AccessibilityLayoutSnapshot.Node(
+                        true, 2L, "skip", "跳过", "跳过广告", 900, 20, 1060, 100)));
+
+        assertFalse(placeholder.hasSelectableContent());
+        assertTrue(button.hasSelectableContent());
     }
 
     @Test

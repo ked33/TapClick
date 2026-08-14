@@ -3,7 +3,9 @@ package com.lgh.tapclick.myclass;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * An immutable copy of the accessibility properties needed by the rule picker.
@@ -19,8 +21,13 @@ public final class AccessibilityLayoutSnapshot {
     public AccessibilityLayoutSnapshot(String appPackage, String appActivity, List<Node> nodes) {
         this.appPackage = valueOrEmpty(appPackage);
         this.appActivity = valueOrEmpty(appActivity);
-        List<Node> sortedNodes = new ArrayList<>(nodes == null
-                ? Collections.emptyList() : nodes);
+        List<Node> sortedNodes = new ArrayList<>();
+        Set<String> nodeKeys = new HashSet<>();
+        for (Node node : nodes == null ? Collections.<Node>emptyList() : nodes) {
+            if (node != null && nodeKeys.add(node.deduplicationKey())) {
+                sortedNodes.add(node);
+            }
+        }
         sortedNodes.sort(Comparator.comparingLong(Node::getArea).reversed());
         this.nodes = Collections.unmodifiableList(sortedNodes);
     }
@@ -39,6 +46,23 @@ public final class AccessibilityLayoutSnapshot {
 
     public boolean isEmpty() {
         return nodes.isEmpty();
+    }
+
+    /**
+     * A single empty root rectangle is not a useful rule target. Some apps
+     * expose that placeholder before their real accessibility window is ready.
+     */
+    public boolean hasSelectableContent() {
+        if (nodes.size() > 1) {
+            return true;
+        }
+        if (nodes.isEmpty()) {
+            return false;
+        }
+        Node node = nodes.get(0);
+        return node.isClickable()
+                || !node.getDescription().isEmpty()
+                || !node.getText().isEmpty();
     }
 
     private static String valueOrEmpty(String value) {
@@ -107,6 +131,15 @@ public final class AccessibilityLayoutSnapshot {
 
         public long getArea() {
             return (long) getWidth() * getHeight();
+        }
+
+        private String deduplicationKey() {
+            return "node:" + nodeId
+                    + "|bounds:" + left + ':' + top + ':' + right + ':' + bottom
+                    + "|clickable:" + clickable
+                    + "|viewId:" + viewId
+                    + "|description:" + description
+                    + "|text:" + text;
         }
     }
 }
