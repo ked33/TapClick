@@ -1562,6 +1562,10 @@ public class MainFunction {
                 + snapshot.getNodes().size();
     }
 
+    private static long capturedNodeQuality(AccessibilityLayoutSnapshot snapshot) {
+        return snapshot == null ? 0L : capturedNodeQuality(snapshot.getNodes());
+    }
+
     private static boolean requiresCaptureEnrichment(
             List<AccessibilityLayoutSnapshot.Node> nodes) {
         AccessibilityLayoutSnapshot snapshot = new AccessibilityLayoutSnapshot("", "", nodes);
