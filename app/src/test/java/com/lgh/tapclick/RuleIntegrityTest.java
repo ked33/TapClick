@@ -66,12 +66,14 @@ public class RuleIntegrityTest {
         widget.appActivity = "example.Activity";
         widget.widgetText = "跳过";
         widget.triggerCount = 8;
+        widget.preconditionRuleId = 999L;
         source.widgetList.add(widget);
         Coordinate coordinate = new Coordinate();
         coordinate.id = 300L;
         coordinate.appPackage = "example.package";
         coordinate.appActivity = "example.Activity";
         coordinate.triggerCount = 5;
+        coordinate.preconditionRuleId = 998L;
         coordinate.visualSignature = VisualCoordinateSignature.create(
                 createVisualPattern(64, 64), 64, 64);
         source.coordinateList.add(coordinate);
@@ -82,10 +84,12 @@ public class RuleIntegrityTest {
         assertEquals(1, imported.widgetList.size());
         assertNull(imported.widgetList.get(0).id);
         assertEquals(0, imported.widgetList.get(0).triggerCount);
+        assertNull(imported.widgetList.get(0).preconditionRuleId);
         assertEquals(1234L, imported.widgetList.get(0).createTime);
         assertEquals(1, imported.coordinateList.size());
         assertNull(imported.coordinateList.get(0).id);
         assertEquals(0, imported.coordinateList.get(0).triggerCount);
+        assertNull(imported.coordinateList.get(0).preconditionRuleId);
         assertEquals(1234L, imported.coordinateList.get(0).createTime);
         assertEquals(coordinate.visualSignature,
                 imported.coordinateList.get(0).visualSignature);
@@ -97,6 +101,65 @@ public class RuleIntegrityTest {
         widget.widgetText = "[invalid";
 
         assertThrows(IllegalArgumentException.class, widget::validatePatterns);
+    }
+
+    @Test
+    public void structuralWidgetConditionsAreValidatedAndCopied() {
+        Widget source = new Widget();
+        source.widgetParentViewId = "example:id/container";
+        source.widgetParentText = "广告.*";
+        source.widgetChildText = "跳过";
+        source.widgetSiblingText = "关闭";
+        source.widgetExcludeText = "已领取";
+        source.maxTriggerCount = 3;
+        source.initialMatchWindowMillis = 1200;
+        source.preconditionRuleId = 9L;
+        source.actionCooldownMillis = 800;
+        source.validatePatterns();
+
+        Widget copy = new Widget(source);
+
+        assertTrue(copy.hasStructuralConstraint());
+        assertTrue(copy.matchesParentText("广告活动"));
+        assertTrue(copy.matchesChildText("跳过"));
+        assertTrue(copy.matchesSiblingText("关闭"));
+        assertTrue(copy.matchesExcludeText("已领取"));
+        assertEquals(3, copy.maxTriggerCount);
+        assertEquals(1200, copy.initialMatchWindowMillis);
+        assertEquals(Long.valueOf(9L), copy.preconditionRuleId);
+        assertEquals(800, copy.actionCooldownMillis);
+    }
+
+    @Test
+    public void scanPolicyHonoursSuccessLimitAndCooldown() {
+        Widget widget = new Widget();
+        widget.maxTriggerCount = 2;
+        widget.triggerCount = 2;
+
+        assertTrue(widget.hasReachedMaxTriggerCount());
+        assertFalse(WidgetScanPolicy.shouldEvaluate(widget, false, false));
+
+        widget.triggerCount = 1;
+        widget.actionCooldownMillis = 1000;
+        widget.lastTriggerTime = 2_000L;
+        assertTrue(WidgetScanPolicy.isCooldownActive(widget, 2_500L));
+        assertFalse(WidgetScanPolicy.isCooldownActive(widget, 3_000L));
+    }
+
+    @Test
+    public void coordinateCopyPreservesExecutionStateConfiguration() {
+        Coordinate source = new Coordinate();
+        source.maxTriggerCount = 4;
+        source.initialMatchWindowMillis = 1500;
+        source.preconditionRuleId = 7L;
+        source.actionCooldownMillis = 900;
+
+        Coordinate copy = new Coordinate(source);
+
+        assertEquals(4, copy.maxTriggerCount);
+        assertEquals(1500, copy.initialMatchWindowMillis);
+        assertEquals(Long.valueOf(7L), copy.preconditionRuleId);
+        assertEquals(900, copy.actionCooldownMillis);
     }
 
     @Test

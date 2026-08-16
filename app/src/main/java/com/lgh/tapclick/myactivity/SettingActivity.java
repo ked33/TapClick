@@ -30,6 +30,16 @@ public class SettingActivity extends BaseActivity {
             }
         });
 
+        settingBinding.settingAutomaticClickToast.setChecked(
+                MyUtils.getAutomaticClickToastEnabled());
+        settingBinding.settingAutomaticClickToast.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                MyUtils.setAutomaticClickToastEnabled(
+                        settingBinding.settingAutomaticClickToast.isChecked());
+            }
+        });
+
         settingBinding.settingAutoHideOnTaskList.setEnabled(false);
         MyApplication.queryDatabase(() -> MyApplication.dataDao.getMyAppConfig(), result -> {
             if (isFinishing() || isDestroyed()) {

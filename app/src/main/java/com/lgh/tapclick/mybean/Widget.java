@@ -3,6 +3,7 @@ package com.lgh.tapclick.mybean;
 import android.graphics.Rect;
 
 import androidx.room.Entity;
+import androidx.room.ColumnInfo;
 import androidx.room.Ignore;
 import androidx.room.Index;
 import androidx.room.PrimaryKey;
@@ -32,6 +33,27 @@ public class Widget {
     public String widgetViewId;
     public String widgetDescribe;
     public String widgetText;
+    /** Optional immediate-parent view id constraint. */
+    public String widgetParentViewId;
+    /** Optional immediate-parent text/content-description regex. */
+    public String widgetParentText;
+    /** Optional direct-child text/content-description regex. */
+    public String widgetChildText;
+    /** Optional sibling text/content-description regex. */
+    public String widgetSiblingText;
+    /** Optional exclusion text/content-description regex for the local neighbourhood. */
+    public String widgetExcludeText;
+    /** 0 means unlimited successful triggers. */
+    @ColumnInfo(defaultValue = "0")
+    public int maxTriggerCount;
+    /** 0 means no Activity-start window limit. */
+    @ColumnInfo(defaultValue = "0")
+    public int initialMatchWindowMillis;
+    /** Optional rule id that must have triggered earlier on this Activity. */
+    public Long preconditionRuleId;
+    /** 0 means no successful-action cooldown. */
+    @ColumnInfo(defaultValue = "0")
+    public int actionCooldownMillis;
     public String comment;
     public String triggerReason;
     public long lastTriggerTime;
@@ -44,6 +66,14 @@ public class Widget {
     private transient Pattern widgetDescribePattern;
     @Ignore
     private transient Pattern widgetTextPattern;
+    @Ignore
+    private transient Pattern widgetParentTextPattern;
+    @Ignore
+    private transient Pattern widgetChildTextPattern;
+    @Ignore
+    private transient Pattern widgetSiblingTextPattern;
+    @Ignore
+    private transient Pattern widgetExcludeTextPattern;
 
     public Widget() {
         this.appPackage = "";
@@ -60,6 +90,15 @@ public class Widget {
         this.widgetViewId = "";
         this.widgetDescribe = "";
         this.widgetText = "";
+        this.widgetParentViewId = "";
+        this.widgetParentText = "";
+        this.widgetChildText = "";
+        this.widgetSiblingText = "";
+        this.widgetExcludeText = "";
+        this.maxTriggerCount = 0;
+        this.initialMatchWindowMillis = 0;
+        this.preconditionRuleId = null;
+        this.actionCooldownMillis = 0;
         this.comment = "";
         this.triggerReason = "";
         this.lastTriggerTime = 0;
@@ -85,6 +124,15 @@ public class Widget {
         this.widgetViewId = widget.widgetViewId;
         this.widgetDescribe = widget.widgetDescribe;
         this.widgetText = widget.widgetText;
+        this.widgetParentViewId = widget.widgetParentViewId;
+        this.widgetParentText = widget.widgetParentText;
+        this.widgetChildText = widget.widgetChildText;
+        this.widgetSiblingText = widget.widgetSiblingText;
+        this.widgetExcludeText = widget.widgetExcludeText;
+        this.maxTriggerCount = widget.maxTriggerCount;
+        this.initialMatchWindowMillis = widget.initialMatchWindowMillis;
+        this.preconditionRuleId = widget.preconditionRuleId;
+        this.actionCooldownMillis = widget.actionCooldownMillis;
         this.comment = widget.comment;
         this.lastTriggerTime = widget.lastTriggerTime;
         this.triggerCount = widget.triggerCount;
@@ -97,6 +145,10 @@ public class Widget {
     public void preparePatterns() {
         widgetDescribePattern = compilePattern(widgetDescribe);
         widgetTextPattern = compilePattern(widgetText);
+        widgetParentTextPattern = compilePattern(widgetParentText);
+        widgetChildTextPattern = compilePattern(widgetChildText);
+        widgetSiblingTextPattern = compilePattern(widgetSiblingText);
+        widgetExcludeTextPattern = compilePattern(widgetExcludeText);
     }
 
     public boolean matchesDescribe(String value) {
@@ -107,9 +159,58 @@ public class Widget {
         return value != null && widgetTextPattern != null && widgetTextPattern.matcher(value).matches();
     }
 
+    public boolean matchesParentText(String value) {
+        return value != null && widgetParentTextPattern != null
+                && widgetParentTextPattern.matcher(value).matches();
+    }
+
+    public boolean matchesChildText(String value) {
+        return value != null && widgetChildTextPattern != null
+                && widgetChildTextPattern.matcher(value).matches();
+    }
+
+    public boolean matchesSiblingText(String value) {
+        return value != null && widgetSiblingTextPattern != null
+                && widgetSiblingTextPattern.matcher(value).matches();
+    }
+
+    public boolean matchesExcludeText(String value) {
+        return value != null && widgetExcludeTextPattern != null
+                && widgetExcludeTextPattern.matcher(value).matches();
+    }
+
+    public boolean hasParentConstraint() {
+        return !isBlank(widgetParentViewId) || !isBlank(widgetParentText);
+    }
+
+    public boolean hasChildConstraint() {
+        return !isBlank(widgetChildText);
+    }
+
+    public boolean hasSiblingConstraint() {
+        return !isBlank(widgetSiblingText);
+    }
+
+    public boolean hasExcludeConstraint() {
+        return !isBlank(widgetExcludeText);
+    }
+
+    public boolean hasStructuralConstraint() {
+        return hasParentConstraint() || hasChildConstraint()
+                || hasSiblingConstraint() || hasExcludeConstraint();
+    }
+
+    public boolean hasReachedMaxTriggerCount() {
+        return maxTriggerCount > 0 && triggerCount >= maxTriggerCount;
+    }
+
     public void validatePatterns() {
         validatePattern(widgetDescribe, "控件描述");
         validatePattern(widgetText, "控件文本");
+        validatePattern(widgetParentText, "父节点文本");
+        validatePattern(widgetChildText, "子节点文本");
+        validatePattern(widgetSiblingText, "兄弟节点文本");
+        validatePattern(widgetExcludeText, "排除文本");
         preparePatterns();
     }
 
@@ -152,6 +253,15 @@ public class Widget {
                 ", widgetViewId='" + widgetViewId + '\'' +
                 ", widgetDescribe='" + widgetDescribe + '\'' +
                 ", widgetText='" + widgetText + '\'' +
+                ", widgetParentViewId='" + widgetParentViewId + '\'' +
+                ", widgetParentText='" + widgetParentText + '\'' +
+                ", widgetChildText='" + widgetChildText + '\'' +
+                ", widgetSiblingText='" + widgetSiblingText + '\'' +
+                ", widgetExcludeText='" + widgetExcludeText + '\'' +
+                ", maxTriggerCount=" + maxTriggerCount +
+                ", initialMatchWindowMillis=" + initialMatchWindowMillis +
+                ", preconditionRuleId=" + preconditionRuleId +
+                ", actionCooldownMillis=" + actionCooldownMillis +
                 ", comment='" + comment + '\'' +
                 ", triggerReason='" + triggerReason + '\'' +
                 ", lastTriggerTime=" + lastTriggerTime +
@@ -161,5 +271,9 @@ public class Widget {
                 ", action=" + action +
                 ", condition=" + condition +
                 '}';
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.trim().isEmpty();
     }
 }

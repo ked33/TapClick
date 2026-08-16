@@ -300,6 +300,15 @@ public class EditDataActivity extends BaseActivity {
             coordinateBinding.coordinateClickDelay.setText(String.valueOf(coordinate.clickDelay));
             coordinateBinding.coordinateClickInterval.setText(String.valueOf(coordinate.clickInterval));
             coordinateBinding.coordinateClickNumber.setText(String.valueOf(coordinate.clickNumber));
+            coordinateBinding.coordinateMaxTriggerCount.setText(
+                    String.valueOf(coordinate.maxTriggerCount));
+            coordinateBinding.coordinateInitialMatchWindow.setText(
+                    String.valueOf(coordinate.initialMatchWindowMillis));
+            coordinateBinding.coordinatePreconditionRuleId.setText(
+                    coordinate.preconditionRuleId == null ? null
+                            : String.valueOf(coordinate.preconditionRuleId));
+            coordinateBinding.coordinateActionCooldown.setText(
+                    String.valueOf(coordinate.actionCooldownMillis));
             coordinateBinding.coordinateTriggerCount.setText(String.valueOf(coordinate.triggerCount));
             coordinateBinding.coordinateComment.setText(coordinate.comment);
             updateCoordinateVisualStatus(coordinateBinding, coordinate);
@@ -328,46 +337,75 @@ public class EditDataActivity extends BaseActivity {
                     String sDelay = StrUtil.trimToEmpty(coordinateBinding.coordinateClickDelay.getText());
                     String sInterval = StrUtil.trimToEmpty(coordinateBinding.coordinateClickInterval.getText());
                     String sNumber = StrUtil.trimToEmpty(coordinateBinding.coordinateClickNumber.getText());
+                    String maxTriggerCount = StrUtil.trimToEmpty(
+                            coordinateBinding.coordinateMaxTriggerCount.getText());
+                    String initialMatchWindow = StrUtil.trimToEmpty(
+                            coordinateBinding.coordinateInitialMatchWindow.getText());
+                    String preconditionRuleId = StrUtil.trimToEmpty(
+                            coordinateBinding.coordinatePreconditionRuleId.getText());
+                    String actionCooldown = StrUtil.trimToEmpty(
+                            coordinateBinding.coordinateActionCooldown.getText());
                     coordinateBinding.coordinateModify.setTextColor(0xfff20000);
-                    if (sX.isEmpty()) {
+                    Integer xPosition = parseNonNegativeInt(sX);
+                    if (xPosition == null) {
                         coordinateBinding.coordinateModify.setText("X轴坐标不能为空");
                         return;
                     }
-                    if (Integer.parseInt(sX) > metrics.widthPixels) {
+                    if (xPosition > metrics.widthPixels) {
                         coordinateBinding.coordinateModify.setText("X轴坐标超出屏幕寸");
                         return;
                     }
-                    if (sY.isEmpty()) {
+                    Integer yPosition = parseNonNegativeInt(sY);
+                    if (yPosition == null) {
                         coordinateBinding.coordinateModify.setText("Y轴坐标不能为空");
                         return;
                     }
-                    if (Integer.parseInt(sY) > metrics.heightPixels) {
+                    if (yPosition > metrics.heightPixels) {
                         coordinateBinding.coordinateModify.setText("Y轴坐标超出屏幕寸");
                         return;
                     }
-                    if (sDelay.isEmpty()) {
+                    Integer delay = parseNonNegativeInt(sDelay);
+                    if (delay == null) {
                         coordinateBinding.coordinateModify.setText("延迟点击不能为空");
                         return;
                     }
-                    if (sInterval.isEmpty()) {
+                    Integer interval = parseNonNegativeInt(sInterval);
+                    if (interval == null) {
                         coordinateBinding.coordinateModify.setText("点击间隔不能为空");
                         return;
                     }
-                    if (sNumber.isEmpty()) {
+                    Integer number = parseNonNegativeInt(sNumber);
+                    if (number == null || number <= 0) {
                         coordinateBinding.coordinateModify.setText("点击次数不能为空");
                         return;
                     }
-                    int xPosition = Integer.parseInt(sX);
-                    int yPosition = Integer.parseInt(sY);
+                    Integer maxTriggers = parseNonNegativeInt(maxTriggerCount);
+                    Integer matchWindow = parseNonNegativeInt(initialMatchWindow);
+                    Integer cooldown = parseNonNegativeInt(actionCooldown);
+                    if (maxTriggers == null || matchWindow == null || cooldown == null) {
+                        coordinateBinding.coordinateModify.setText("高级执行参数必须为非负整数");
+                        return;
+                    }
+                    Long precondition;
+                    try {
+                        precondition = parseOptionalRuleId(preconditionRuleId);
+                    } catch (IllegalArgumentException exception) {
+                        coordinateBinding.coordinateModify.setText("前置规则ID格式错误");
+                        return;
+                    }
                     if ((coordinate.xPosition != xPosition || coordinate.yPosition != yPosition)
                             && !TextUtils.isEmpty(coordinate.visualSignature)) {
                         coordinate.visualSignature = null;
                     }
                     coordinate.xPosition = xPosition;
                     coordinate.yPosition = yPosition;
-                    coordinate.clickDelay = Integer.parseInt(sDelay);
-                    coordinate.clickInterval = Integer.parseInt(sInterval);
-                    coordinate.clickNumber = Integer.parseInt(sNumber);
+                    coordinate.clickDelay = delay;
+                    coordinate.clickInterval = interval;
+                    coordinate.clickNumber = number;
+                    coordinate.maxTriggerCount = maxTriggers;
+                    coordinate.initialMatchWindowMillis = matchWindow;
+                    coordinate.preconditionRuleId = precondition;
+                    coordinate.actionCooldownMillis = cooldown;
                     coordinate.comment = StrUtil.trimToEmpty(coordinateBinding.coordinateComment.getText());
                     updateCoordinateVisualStatus(coordinateBinding, coordinate);
                     queueCoordinateSave(coordinate);
@@ -398,6 +436,10 @@ public class EditDataActivity extends BaseActivity {
             coordinateBinding.coordinateClickDelay.addTextChangedListener(coordinateTextWatcher);
             coordinateBinding.coordinateClickInterval.addTextChangedListener(coordinateTextWatcher);
             coordinateBinding.coordinateClickNumber.addTextChangedListener(coordinateTextWatcher);
+            coordinateBinding.coordinateMaxTriggerCount.addTextChangedListener(coordinateTextWatcher);
+            coordinateBinding.coordinateInitialMatchWindow.addTextChangedListener(coordinateTextWatcher);
+            coordinateBinding.coordinatePreconditionRuleId.addTextChangedListener(coordinateTextWatcher);
+            coordinateBinding.coordinateActionCooldown.addTextChangedListener(coordinateTextWatcher);
             coordinateBinding.coordinateComment.addTextChangedListener(coordinateTextWatcher);
 
             coordinateBinding.coordinateShare.setOnClickListener(new View.OnClickListener() {
@@ -478,6 +520,18 @@ public class EditDataActivity extends BaseActivity {
             widgetBinding.widgetViewId.setText(widget.widgetViewId);
             widgetBinding.widgetDescribe.setText(widget.widgetDescribe);
             widgetBinding.widgetText.setText(widget.widgetText);
+            widgetBinding.widgetParentViewId.setText(widget.widgetParentViewId);
+            widgetBinding.widgetParentText.setText(widget.widgetParentText);
+            widgetBinding.widgetChildText.setText(widget.widgetChildText);
+            widgetBinding.widgetSiblingText.setText(widget.widgetSiblingText);
+            widgetBinding.widgetExcludeText.setText(widget.widgetExcludeText);
+            widgetBinding.widgetMaxTriggerCount.setText(String.valueOf(widget.maxTriggerCount));
+            widgetBinding.widgetInitialMatchWindow.setText(
+                    String.valueOf(widget.initialMatchWindowMillis));
+            widgetBinding.widgetPreconditionRuleId.setText(widget.preconditionRuleId == null ? null
+                    : String.valueOf(widget.preconditionRuleId));
+            widgetBinding.widgetActionCooldown.setText(
+                    String.valueOf(widget.actionCooldownMillis));
             widgetBinding.widgetClickDelay.setText(String.valueOf(widget.clickDelay));
             widgetBinding.widgetDebounceDelay.setText(String.valueOf(widget.debounceDelay));
             widgetBinding.widgetNoRepeat.setChecked(widget.noRepeat);
@@ -520,21 +574,47 @@ public class EditDataActivity extends BaseActivity {
                     String clickInterval = StrUtil.trimToEmpty(widgetBinding.widgetClickInterval.getText());
                     String clickDelay = StrUtil.trimToEmpty(widgetBinding.widgetClickDelay.getText());
                     String debounceDelay = StrUtil.trimToEmpty(widgetBinding.widgetDebounceDelay.getText());
+                    String maxTriggerCount = StrUtil.trimToEmpty(
+                            widgetBinding.widgetMaxTriggerCount.getText());
+                    String initialMatchWindow = StrUtil.trimToEmpty(
+                            widgetBinding.widgetInitialMatchWindow.getText());
+                    String preconditionRuleId = StrUtil.trimToEmpty(
+                            widgetBinding.widgetPreconditionRuleId.getText());
+                    String actionCooldown = StrUtil.trimToEmpty(
+                            widgetBinding.widgetActionCooldown.getText());
                     widgetBinding.widgetModify.setTextColor(0xfff20000);
-                    if (clickNumber.isEmpty()) {
+                    Integer number = parseNonNegativeInt(clickNumber);
+                    if (number == null || number <= 0) {
                         widgetBinding.widgetModify.setText("点击次数不能为空");
                         return;
                     }
-                    if (clickInterval.isEmpty()) {
+                    Integer interval = parseNonNegativeInt(clickInterval);
+                    if (interval == null) {
                         widgetBinding.widgetModify.setText("点击间隔不能为空");
                         return;
                     }
-                    if (clickDelay.isEmpty()) {
+                    Integer delay = parseNonNegativeInt(clickDelay);
+                    if (delay == null) {
                         widgetBinding.widgetModify.setText("最小触发间隔不能为空");
                         return;
                     }
-                    if (debounceDelay.isEmpty()) {
+                    Integer debounce = parseNonNegativeInt(debounceDelay);
+                    if (debounce == null) {
                         widgetBinding.widgetModify.setText("防抖延迟不能为空");
+                        return;
+                    }
+                    Integer maxTriggers = parseNonNegativeInt(maxTriggerCount);
+                    Integer matchWindow = parseNonNegativeInt(initialMatchWindow);
+                    Integer cooldown = parseNonNegativeInt(actionCooldown);
+                    if (maxTriggers == null || matchWindow == null || cooldown == null) {
+                        widgetBinding.widgetModify.setText("高级执行参数必须为非负整数");
+                        return;
+                    }
+                    Long precondition;
+                    try {
+                        precondition = parseOptionalRuleId(preconditionRuleId);
+                    } catch (IllegalArgumentException exception) {
+                        widgetBinding.widgetModify.setText("前置规则ID格式错误");
                         return;
                     }
                     try {
@@ -551,6 +631,16 @@ public class EditDataActivity extends BaseActivity {
                     widget.widgetViewId = StrUtil.toStringOrEmpty(widgetBinding.widgetViewId.getText());
                     widget.widgetDescribe = StrUtil.toStringOrEmpty(widgetBinding.widgetDescribe.getText());
                     widget.widgetText = StrUtil.toStringOrEmpty(widgetBinding.widgetText.getText());
+                    widget.widgetParentViewId = StrUtil.toStringOrEmpty(
+                            widgetBinding.widgetParentViewId.getText());
+                    widget.widgetParentText = StrUtil.toStringOrEmpty(
+                            widgetBinding.widgetParentText.getText());
+                    widget.widgetChildText = StrUtil.toStringOrEmpty(
+                            widgetBinding.widgetChildText.getText());
+                    widget.widgetSiblingText = StrUtil.toStringOrEmpty(
+                            widgetBinding.widgetSiblingText.getText());
+                    widget.widgetExcludeText = StrUtil.toStringOrEmpty(
+                            widgetBinding.widgetExcludeText.getText());
                     try {
                         widget.validatePatterns();
                     } catch (IllegalArgumentException e) {
@@ -558,10 +648,14 @@ public class EditDataActivity extends BaseActivity {
                         return;
                     }
                     widget.comment = StrUtil.trimToEmpty(widgetBinding.widgetComment.getText());
-                    widget.clickNumber = Integer.parseInt(clickNumber);
-                    widget.clickInterval = Integer.parseInt(clickInterval);
-                    widget.clickDelay = Integer.parseInt(clickDelay);
-                    widget.debounceDelay = Integer.parseInt(debounceDelay);
+                    widget.clickNumber = number;
+                    widget.clickInterval = interval;
+                    widget.clickDelay = delay;
+                    widget.debounceDelay = debounce;
+                    widget.maxTriggerCount = maxTriggers;
+                    widget.initialMatchWindowMillis = matchWindow;
+                    widget.preconditionRuleId = precondition;
+                    widget.actionCooldownMillis = cooldown;
                     widget.noRepeat = widgetBinding.widgetNoRepeat.isChecked();
                     widget.clickOnly = widgetBinding.widgetClickOnly.isChecked();
                     queueWidgetSave(widget);
@@ -592,6 +686,15 @@ public class EditDataActivity extends BaseActivity {
             widgetBinding.widgetViewId.addTextChangedListener(widgetTextWatcher);
             widgetBinding.widgetDescribe.addTextChangedListener(widgetTextWatcher);
             widgetBinding.widgetText.addTextChangedListener(widgetTextWatcher);
+            widgetBinding.widgetParentViewId.addTextChangedListener(widgetTextWatcher);
+            widgetBinding.widgetParentText.addTextChangedListener(widgetTextWatcher);
+            widgetBinding.widgetChildText.addTextChangedListener(widgetTextWatcher);
+            widgetBinding.widgetSiblingText.addTextChangedListener(widgetTextWatcher);
+            widgetBinding.widgetExcludeText.addTextChangedListener(widgetTextWatcher);
+            widgetBinding.widgetMaxTriggerCount.addTextChangedListener(widgetTextWatcher);
+            widgetBinding.widgetInitialMatchWindow.addTextChangedListener(widgetTextWatcher);
+            widgetBinding.widgetPreconditionRuleId.addTextChangedListener(widgetTextWatcher);
+            widgetBinding.widgetActionCooldown.addTextChangedListener(widgetTextWatcher);
             widgetBinding.widgetClickNumber.addTextChangedListener(widgetTextWatcher);
             widgetBinding.widgetClickInterval.addTextChangedListener(widgetTextWatcher);
             widgetBinding.widgetClickDelay.addTextChangedListener(widgetTextWatcher);
@@ -696,6 +799,33 @@ public class EditDataActivity extends BaseActivity {
         super.onDestroy();
         if (myAppConfig != null && myAppConfig.autoHideOnTaskList) {
             MyUtils.setExcludeFromRecents(true);
+        }
+    }
+
+    private static Integer parseNonNegativeInt(String value) {
+        if (TextUtils.isEmpty(value)) {
+            return null;
+        }
+        try {
+            int parsed = Integer.parseInt(value);
+            return parsed >= 0 ? parsed : null;
+        } catch (NumberFormatException exception) {
+            return null;
+        }
+    }
+
+    private static Long parseOptionalRuleId(String value) {
+        if (TextUtils.isEmpty(value)) {
+            return null;
+        }
+        try {
+            long parsed = Long.parseLong(value);
+            if (parsed < 0L) {
+                throw new NumberFormatException("negative");
+            }
+            return parsed;
+        } catch (NumberFormatException exception) {
+            throw new IllegalArgumentException("invalid rule id", exception);
         }
     }
 

@@ -145,6 +145,16 @@ public class MyUtils {
         preferences.edit().putBoolean("runtimeLoggingEnabled", enable).apply();
     }
 
+    public static boolean getAutomaticClickToastEnabled() {
+        SharedPreferences preferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE);
+        return preferences.getBoolean("automaticClickToastEnabled", true);
+    }
+
+    public static void setAutomaticClickToastEnabled(boolean enable) {
+        SharedPreferences preferences = mContext.getSharedPreferences(mContext.getPackageName(), Context.MODE_PRIVATE);
+        preferences.edit().putBoolean("automaticClickToastEnabled", enable).apply();
+    }
+
     public static boolean requestUpdateAllDate() {
         try {
             ContentValues contentValues = new ContentValues();
