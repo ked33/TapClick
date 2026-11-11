@@ -3,6 +3,7 @@ package com.lgh.tapclick.mybean;
 import androidx.room.Entity;
 import androidx.room.ColumnInfo;
 import androidx.room.Index;
+import androidx.room.Ignore;
 import androidx.room.PrimaryKey;
 
 @Entity(indices = @Index(value = {"appPackage"}))
@@ -26,12 +27,18 @@ public class Coordinate {
     public int initialMatchWindowMillis;
     /** Optional rule id that must have triggered earlier on this Activity. */
     public Long preconditionRuleId;
+    @ColumnInfo(defaultValue = "0")
+    public int preconditionRuleType;
+    @Ignore
+    public transient com.lgh.tapclick.myclass.RuleReference resolvedPrecondition;
+    @Ignore
+    public transient boolean preconditionValid = true;
     /** 0 means no successful-action cooldown. */
     @ColumnInfo(defaultValue = "0")
     public int actionCooldownMillis;
     public String comment;
-    public long lastTriggerTime;
-    public int triggerCount;
+    public volatile long lastTriggerTime;
+    public volatile int triggerCount;
 
     public Coordinate() {
         this.appPackage = "";
@@ -65,6 +72,7 @@ public class Coordinate {
         this.maxTriggerCount = coordinate.maxTriggerCount;
         this.initialMatchWindowMillis = coordinate.initialMatchWindowMillis;
         this.preconditionRuleId = coordinate.preconditionRuleId;
+        this.preconditionRuleType = coordinate.preconditionRuleType;
         this.actionCooldownMillis = coordinate.actionCooldownMillis;
         this.comment = coordinate.comment;
         this.lastTriggerTime = coordinate.lastTriggerTime;

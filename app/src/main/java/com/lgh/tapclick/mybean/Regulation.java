@@ -41,6 +41,7 @@ public class Regulation {
             coordinate.lastTriggerTime = 0;
             coordinate.triggerCount = 0;
             coordinate.preconditionRuleId = null;
+            coordinate.preconditionRuleType = 0;
             coordinateList.add(coordinate);
         }
         for (Widget sourceWidget : source.widgetList) {
@@ -53,6 +54,7 @@ public class Regulation {
             widget.lastTriggerTime = 0;
             widget.triggerCount = 0;
             widget.preconditionRuleId = null;
+            widget.preconditionRuleType = 0;
             widget.triggerReason = "";
             widget.validatePatterns();
             widgetList.add(widget);

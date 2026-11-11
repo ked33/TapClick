@@ -166,6 +166,46 @@ final class SerializedDataDao extends DataDao {
     }
 
     @Override
+    public void updateAppConfiguration(RuleConfiguration.AppDescribeConfig config) {
+        MyApplication.callDatabase(() -> {
+            delegate.updateAppConfiguration(config);
+            return null;
+        });
+    }
+
+    @Override
+    public void updateCoordinateConfigurations(List<RuleConfiguration.CoordinateConfig> configs) {
+        MyApplication.callDatabase(() -> {
+            delegate.updateCoordinateConfigurations(configs);
+            return null;
+        });
+    }
+
+    @Override
+    public void updateWidgetConfigurations(List<RuleConfiguration.WidgetConfig> configs) {
+        MyApplication.callDatabase(() -> {
+            delegate.updateWidgetConfigurations(configs);
+            return null;
+        });
+    }
+
+    @Override
+    public void recordCoordinateTrigger(long id, long time) {
+        MyApplication.callDatabase(() -> {
+            delegate.recordCoordinateTrigger(id, time);
+            return null;
+        });
+    }
+
+    @Override
+    public void recordWidgetTrigger(long id, long time, String reason) {
+        MyApplication.callDatabase(() -> {
+            delegate.recordWidgetTrigger(id, time, reason);
+            return null;
+        });
+    }
+
+    @Override
     public void updateCoordinate(Coordinate coordinate) {
         MyApplication.callDatabase(() -> {
             delegate.updateCoordinate(coordinate);

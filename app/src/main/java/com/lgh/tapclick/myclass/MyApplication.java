@@ -36,6 +36,7 @@ public class MyApplication extends Application {
             new Thread(runnable, "TapClick-IO-" + IO_THREAD_NUMBER.incrementAndGet()));
 
     private static Handler mainHandler;
+    private static volatile RuntimeException databaseInitializationFailure;
     public static DataDao dataDao;
 
     public interface DatabaseCallback<T> {
@@ -100,23 +101,15 @@ public class MyApplication extends Application {
             dataDao = new SerializedDataDao(roomDataDao);
         }
 
-        Future<?> configFuture = DATABASE_EXECUTOR.submit(new Runnable() {
-            @Override
-            public void run() {
-                MyAppConfig myAppConfig = dataDao.getMyAppConfig();
-                if (myAppConfig == null) {
-                    dataDao.insertMyAppConfig(new MyAppConfig());
-                }
+        // FIFO initialization: later DAO tasks wait in the executor, never on the UI thread.
+        DATABASE_EXECUTOR.execute(() -> {
+            try {
+                dataDao.insertMyAppConfig(new MyAppConfig());
+            } catch (RuntimeException exception) {
+                databaseInitializationFailure = exception;
+                postToMain(() -> { throw new IllegalStateException("初始化应用数据库失败", exception); });
             }
         });
-        try {
-            configFuture.get();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("初始化应用配置时线程被中断", e);
-        } catch (ExecutionException e) {
-            throw new IllegalStateException("初始化应用数据库失败", e.getCause());
-        }
 
         MyUtils.init(base);
     }
@@ -157,6 +150,7 @@ public class MyApplication extends Application {
     }
 
     static <T> T callDatabase(Callable<T> callable) {
+        if (databaseInitializationFailure != null) { throw databaseInitializationFailure; }
         if (Thread.currentThread() == DATABASE_THREAD.get()) {
             return callUnchecked(callable);
         }

@@ -6,6 +6,7 @@ import androidx.room.Index;
 import androidx.room.PrimaryKey;
 
 import com.lgh.tapclick.myclass.DataDao;
+import com.lgh.tapclick.myclass.RuleReference;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -116,6 +117,23 @@ public class AppDescribe {
             }
         }
         for (AppDescribe describe : appDescribes) {
+            RuleReference.Index referenceIndex = new RuleReference.Index(describe.coordinateList, describe.widgetList);
+            for (Coordinate rule : describe.coordinateList) {
+                rule.resolvedPrecondition = referenceIndex.resolve(rule.preconditionRuleType,
+                        rule.preconditionRuleId, rule.appActivity);
+                rule.preconditionValid = rule.preconditionRuleId == null
+                        || (rule.resolvedPrecondition != null && rule.id != null
+                        && referenceIndex.validate(new RuleReference(RuleReference.COORDINATE, rule.id),
+                        rule.resolvedPrecondition, rule.appActivity) == null);
+            }
+            for (Widget rule : describe.widgetList) {
+                rule.resolvedPrecondition = referenceIndex.resolve(rule.preconditionRuleType,
+                        rule.preconditionRuleId, rule.appActivity);
+                rule.preconditionValid = rule.preconditionRuleId == null
+                        || (rule.resolvedPrecondition != null && rule.id != null
+                        && referenceIndex.validate(new RuleReference(RuleReference.WIDGET, rule.id),
+                        rule.resolvedPrecondition, rule.appActivity) == null);
+            }
             describe.coordinateSetMap = groupCoordinatesByActivity(describe.coordinateList);
             describe.widgetSetMap = groupWidgetsByActivity(describe.widgetList);
         }

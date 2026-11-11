@@ -10,7 +10,7 @@ import java.util.Objects;
 final class DoubleTapCaptureController {
     // Removing the input window precedes injection; never inject through our own window.
     private static final long WINDOW_REMOVAL_DELAY_MILLIS = 32L;
-    private static final long REPLAY_TIMEOUT_MILLIS = 1000L;
+    private static final long REPLAY_TIMEOUT_MILLIS = 4000L;
 
     interface Host {
         Object currentTarget();

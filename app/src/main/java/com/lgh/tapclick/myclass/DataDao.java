@@ -97,6 +97,23 @@ public abstract class DataDao {
     @Update
     public abstract void updateAppDescribes(List<AppDescribe> appDescribes);
 
+    @Update(entity = AppDescribe.class)
+    public abstract void updateAppConfiguration(RuleConfiguration.AppDescribeConfig config);
+
+    @Update(entity = Coordinate.class)
+    public abstract void updateCoordinateConfigurations(List<RuleConfiguration.CoordinateConfig> configs);
+
+    @Update(entity = Widget.class)
+    public abstract void updateWidgetConfigurations(List<RuleConfiguration.WidgetConfig> configs);
+
+    @Query("UPDATE Coordinate SET triggerCount = MIN(triggerCount + 1, 2147483647), " +
+            "lastTriggerTime = :time WHERE id = :id")
+    public abstract void recordCoordinateTrigger(long id, long time);
+
+    @Query("UPDATE Widget SET triggerCount = MIN(triggerCount + 1, 2147483647), " +
+            "lastTriggerTime = :time, triggerReason = :reason WHERE id = :id")
+    public abstract void recordWidgetTrigger(long id, long time, String reason);
+
     @Update
     public abstract void updateCoordinate(Coordinate coordinate);
 
@@ -147,6 +164,8 @@ public abstract class DataDao {
     public AppDescribe importWidget(Widget source, String appName) {
         Widget widget = new Widget(source);
         widget.id = null;
+        widget.preconditionRuleId = null;
+        widget.preconditionRuleType = 0;
         widget.createTime = System.currentTimeMillis();
         widget.lastTriggerTime = 0;
         widget.triggerCount = 0;
@@ -168,6 +187,8 @@ public abstract class DataDao {
             throw new IllegalArgumentException("坐标视觉校验数据无效");
         }
         coordinate.id = null;
+        coordinate.preconditionRuleId = null;
+        coordinate.preconditionRuleType = 0;
         coordinate.createTime = System.currentTimeMillis();
         coordinate.lastTriggerTime = 0;
         coordinate.triggerCount = 0;

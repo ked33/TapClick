@@ -68,6 +68,7 @@ import com.lgh.tapclick.mybean.Widget;
 import com.lgh.tapclick.myclass.AccessibilityNodeFreshness;
 import com.lgh.tapclick.myclass.AccessibilityLayoutSnapshot;
 import com.lgh.tapclick.myclass.DataDao;
+import com.lgh.tapclick.myclass.RuleReference;
 import com.lgh.tapclick.myclass.MyApplication;
 import com.lgh.tapclick.myclass.PackageCatalog;
 import com.lgh.tapclick.myclass.RuntimeAppDescribeMap;
@@ -97,6 +98,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -148,7 +151,9 @@ public class MainFunction {
     private final Handler mainHandler;
     private final Set<Widget> alreadyClickSet;
     private final Set<Widget> debounceSet;
-    private final Set<Long> triggeredRuleIds;
+    private final Set<Widget> failedWidgetSet;
+    private final Set<RuleReference> triggeredRuleIds;
+    private final ActionDispatcher actionDispatcher;
     private final LinkedList<String> logList;
     private final Gson debugGson;
     private final SimpleDateFormat simpleDateFormat;
@@ -176,6 +181,7 @@ public class MainFunction {
     private volatile List<Coordinate> coordinateSet;
     private volatile List<Widget> widgetSet;
     private volatile ScheduledFuture<?> pendingWidgetScan;
+    private final Runnable widgetEligibilityTask = this::refreshWidgetScanEligibility;
     private volatile long pageGeneration;
     private volatile long packageGeneration;
     private volatile long currentActivityStartedAtUptimeMillis;
@@ -224,12 +230,18 @@ public class MainFunction {
         executorServiceCapture.setKeepAliveTime(30, TimeUnit.SECONDS);
         executorServiceCapture.allowCoreThreadTimeOut(true);
         mainHandler = new Handler(Looper.getMainLooper());
+        actionDispatcher = new ActionDispatcher(new ActionDispatcher.Host() {
+            public long now() { return SystemClock.uptimeMillis(); }
+            public void post(Runnable action, long delay) { mainHandler.postDelayed(action, delay); }
+            public void remove(Runnable action) { mainHandler.removeCallbacks(action); }
+        });
         simpleDateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT);
         debugGson = BuildConfig.DEBUG ? new GsonBuilder().setPrettyPrinting().create() : null;
         appDescribe = new AppDescribe();
         alreadyClickSet = Collections.newSetFromMap(new ConcurrentHashMap<>());
         appDescribeMap = Collections.emptyMap();
         debounceSet = Collections.newSetFromMap(new ConcurrentHashMap<>());
+        failedWidgetSet = Collections.newSetFromMap(new ConcurrentHashMap<>());
         triggeredRuleIds = Collections.newSetFromMap(new ConcurrentHashMap<>());
         logList = new LinkedList<>();
         serviceInfoLock = new Object();
@@ -399,6 +411,7 @@ public class MainFunction {
                     cancelAllPageTasks();
                     alreadyClickSet.clear();
                     debounceSet.clear();
+                    failedWidgetSet.clear();
                     triggeredRuleIds.clear();
                     List<Coordinate> coordinates = coordinateSetMap != null ? coordinateSetMap.get(activityName) : null;
                     List<Widget> widgets = widgetSetMap != null ? widgetSetMap.get(activityName) : null;
@@ -408,7 +421,7 @@ public class MainFunction {
                     onOffWidgetSub = onOffWidget && widgetSet != null;
 
                     if (onOffWidgetSub) {
-                        setContentChangeEventsEnabled(true);
+                        refreshWidgetScanEligibility();
                     }
 
                     if (onOffCoordinateSub) {
@@ -417,7 +430,7 @@ public class MainFunction {
                         }
                     }
                 }
-                if (!onOffWidgetSub) {
+                if (!onOffWidgetSub || !contentChangeEventsEnabled) {
                     break;
                 }
                 List<AccessibilityWindowInfo> windowInfoList = service.getWindows();
@@ -446,7 +459,7 @@ public class MainFunction {
                 if (source == null) {
                     break;
                 }
-                if (!onOffWidgetSub) {
+                if (!onOffWidgetSub || !contentChangeEventsEnabled) {
                     break;
                 }
                 scheduleWidgetScan(Collections.singletonList(source), widgetSet, pageGeneration, 0);
@@ -576,8 +589,10 @@ public class MainFunction {
             }
         }
         int visitedCount = 0;
-        while (!list.isEmpty() && onOffWidgetSub && generation == pageGeneration && !closed.get()) {
+        Set<AccessibilityNodeInfo> visited = new HashSet<>();
+        while (!list.isEmpty() && onOffWidgetSub && contentChangeEventsEnabled && generation == pageGeneration && !closed.get()) {
             AccessibilityNodeInfo nodeInfo = list.poll();
+            if (!visited.add(nodeInfo)) { continue; }
             if (++visitedCount > WIDGET_MAX_DESCENDANTS) {
                 if (runtimeLoggingEnabled) {
                     addLog("控件扫描达到节点上限，已停止");
@@ -605,13 +620,14 @@ public class MainFunction {
         String describe = null;
         String text = null;
         boolean nodePropertiesLoaded = false;
+        NodeNeighborhood neighborhood = new NodeNeighborhood(nodeInfo);
         for (Widget e : widgets) {
             boolean alreadyClicked = alreadyClickSet.contains(e);
             boolean debouncing = debounceSet.contains(e);
-            if (!WidgetScanPolicy.shouldEvaluate(e, alreadyClicked, debouncing)
+            if (failedWidgetSet.contains(e) || !WidgetScanPolicy.shouldEvaluate(e, alreadyClicked, debouncing)
                     || WidgetScanPolicy.isCooldownActive(e, System.currentTimeMillis())
                     || !isWithinInitialMatchWindow(e.initialMatchWindowMillis)
-                    || !hasSatisfiedPrecondition(e.preconditionRuleId)) {
+                    || (!e.preconditionValid || !hasSatisfiedPrecondition(e.resolvedPrecondition))) {
                 continue;
             }
             if (!nodePropertiesLoaded) {
@@ -622,15 +638,6 @@ public class MainFunction {
                 describe = StrUtil.emptyToNull(nodeInfo.getContentDescription());
                 text = StrUtil.emptyToNull(nodeInfo.getText());
                 nodePropertiesLoaded = true;
-            }
-            boolean parentMatched = e.hasParentConstraint()
-                    && matchesWidgetParent(nodeInfo, e);
-            boolean childMatched = e.hasChildConstraint()
-                    && matchesWidgetChild(nodeInfo, e);
-            boolean siblingMatched = e.hasSiblingConstraint()
-                    && matchesWidgetSibling(nodeInfo, e);
-            if (e.hasExcludeConstraint() && matchesWidgetExclude(nodeInfo, e)) {
-                continue;
             }
             String triggerReason;
             if (e.condition == Widget.CONDITION_OR) {
@@ -645,11 +652,11 @@ public class MainFunction {
                     triggerReason = "Describe 匹配";
                 } else if (!TextUtils.isEmpty(e.widgetText) && e.matchesText(text)) {
                     triggerReason = "Text 匹配";
-                } else if (parentMatched) {
+                } else if (e.hasParentConstraint() && matchesWidgetParent(neighborhood, e)) {
                     triggerReason = "父节点匹配";
-                } else if (childMatched) {
+                } else if (e.hasChildConstraint() && matchesWidgetChild(neighborhood, e)) {
                     triggerReason = "子节点匹配";
-                } else if (siblingMatched) {
+                } else if (e.hasSiblingConstraint() && matchesWidgetSibling(neighborhood, e)) {
                     triggerReason = "兄弟节点匹配";
                 } else {
                     continue;
@@ -692,21 +699,21 @@ public class MainFunction {
                     }
                 }
                 if (e.hasParentConstraint()) {
-                    if (parentMatched) {
+                    if (matchesWidgetParent(neighborhood, e)) {
                         strBuildTrigger.append(", 父节点");
                     } else {
                         continue;
                     }
                 }
                 if (e.hasChildConstraint()) {
-                    if (childMatched) {
+                    if (matchesWidgetChild(neighborhood, e)) {
                         strBuildTrigger.append(", 子节点");
                     } else {
                         continue;
                     }
                 }
                 if (e.hasSiblingConstraint()) {
-                    if (siblingMatched) {
+                    if (matchesWidgetSibling(neighborhood, e)) {
                         strBuildTrigger.append(", 兄弟节点");
                     } else {
                         continue;
@@ -726,54 +733,22 @@ public class MainFunction {
             } else {
                 continue;
             }
-            e.triggerReason = triggerReason;
-            if (e.action == Widget.ACTION_CLICK) {
-                if (e.noRepeat && !alreadyClickSet.add(e)) {
-                    continue;
-                }
-                if (!debounceSet.add(e)) {
-                    continue;
-                }
-                schedulePageTask(executorServiceSub, new Runnable() {
-                    @Override
-                    public void run() {
-                        debounceSet.remove(e);
-                    }
-                }, (long) e.clickDelay + Math.max(e.debounceDelay,
-                        WIDGET_POST_ACTION_FREEZE_MILLIS));
-
-                scheduleWidgetClick(nodeInfo, e, widgets, generation, 0, e.clickDelay);
-            } else if (e.action == Widget.ACTION_BACK) {
-                if (!alreadyClickSet.add(e)) {
-                    continue;
-                }
-                if (generation == pageGeneration
-                        && onOffWidgetSub
-                        && currentActivity.equals(e.appActivity)
-                        && AccessibilityNodeFreshness.refresh(nodeInfo)) {
-                    boolean actionAccepted = service.performGlobalAction(
-                            AccessibilityService.GLOBAL_ACTION_BACK);
-                    if (actionAccepted) {
-                        markSuccessfulRuleTrigger(e.id);
-                        e.triggerCount += 1;
-                        e.lastTriggerTime = System.currentTimeMillis();
-                        MyApplication.executeDatabase(() -> dataDao.updateWidget(e));
-                        showAutomaticClickToast(e.comment);
-                    }
-                    addRuleLog("widget", e.id, e.appPackage, e.appActivity, e.triggerReason,
-                            actionAccepted ? "返回已执行" : "返回执行失败", e);
-                    if (!hasPendingWidgetRules(widgets)) {
-                        setContentChangeEventsEnabled(false);
-                    }
-                }
+            if (e.hasExcludeConstraint() && matchesWidgetExclude(neighborhood, e)) {
+                continue;
             }
+            e.triggerReason = triggerReason;
+            if (!debounceSet.add(e)) {
+                continue;
+            }
+            scheduleWidgetClick(nodeInfo, e, widgets, generation, 0, e.clickDelay);
+            refreshWidgetScanEligibility();
             break;
         }
     }
 
-    private boolean matchesWidgetParent(AccessibilityNodeInfo nodeInfo, Widget widget) {
+    private boolean matchesWidgetParent(NodeNeighborhood neighborhood, Widget widget) {
         try {
-            AccessibilityNodeInfo parent = AccessibilityNodeFreshness.mark(nodeInfo.getParent());
+            AccessibilityNodeInfo parent = neighborhood.parent();
             if (parent == null) {
                 return false;
             }
@@ -789,11 +764,9 @@ public class MainFunction {
         }
     }
 
-    private boolean matchesWidgetChild(AccessibilityNodeInfo nodeInfo, Widget widget) {
+    private boolean matchesWidgetChild(NodeNeighborhood neighborhood, Widget widget) {
         try {
-            int childCount = Math.min(nodeInfo.getChildCount(), WIDGET_MAX_CHILDREN);
-            for (int index = 0; index < childCount; index++) {
-                AccessibilityNodeInfo child = AccessibilityNodeFreshness.mark(nodeInfo.getChild(index));
+            for (AccessibilityNodeInfo child : neighborhood.children()) {
                 if (child != null && matchesChildTextOrDescription(child, widget)) {
                     return true;
                 }
@@ -804,16 +777,14 @@ public class MainFunction {
         }
     }
 
-    private boolean matchesWidgetSibling(AccessibilityNodeInfo nodeInfo, Widget widget) {
+    private boolean matchesWidgetSibling(NodeNeighborhood neighborhood, Widget widget) {
         try {
-            AccessibilityNodeInfo parent = AccessibilityNodeFreshness.mark(nodeInfo.getParent());
+            AccessibilityNodeInfo parent = neighborhood.parent();
             if (parent == null) {
                 return false;
             }
-            int childCount = Math.min(parent.getChildCount(), WIDGET_MAX_CHILDREN);
-            for (int index = 0; index < childCount; index++) {
-                AccessibilityNodeInfo sibling = AccessibilityNodeFreshness.mark(parent.getChild(index));
-                if (sibling != null && !sibling.equals(nodeInfo)
+            for (AccessibilityNodeInfo sibling : neighborhood.siblings()) {
+                if (sibling != null && !sibling.equals(neighborhood.node)
                         && matchesSiblingTextOrDescription(sibling, widget)) {
                     return true;
                 }
@@ -824,18 +795,16 @@ public class MainFunction {
         }
     }
 
-    private boolean matchesWidgetExclude(AccessibilityNodeInfo nodeInfo, Widget widget) {
+    private boolean matchesWidgetExclude(NodeNeighborhood neighborhood, Widget widget) {
         try {
-            if (matchesExcludeTextOrDescription(nodeInfo, widget)) {
+            if (matchesExcludeTextOrDescription(neighborhood.node, widget)) {
                 return true;
             }
-            AccessibilityNodeInfo parent = AccessibilityNodeFreshness.mark(nodeInfo.getParent());
+            AccessibilityNodeInfo parent = neighborhood.parent();
             if (parent != null && matchesExcludeTextOrDescription(parent, widget)) {
                 return true;
             }
-            int childCount = Math.min(nodeInfo.getChildCount(), WIDGET_MAX_CHILDREN);
-            for (int index = 0; index < childCount; index++) {
-                AccessibilityNodeInfo child = AccessibilityNodeFreshness.mark(nodeInfo.getChild(index));
+            for (AccessibilityNodeInfo child : neighborhood.children()) {
                 if (child != null && matchesExcludeTextOrDescription(child, widget)) {
                     return true;
                 }
@@ -843,10 +812,8 @@ public class MainFunction {
             if (parent == null) {
                 return false;
             }
-            int siblingCount = Math.min(parent.getChildCount(), WIDGET_MAX_CHILDREN);
-            for (int index = 0; index < siblingCount; index++) {
-                AccessibilityNodeInfo sibling = AccessibilityNodeFreshness.mark(parent.getChild(index));
-                if (sibling != null && !sibling.equals(nodeInfo)
+            for (AccessibilityNodeInfo sibling : neighborhood.siblings()) {
+                if (sibling != null && !sibling.equals(neighborhood.node)
                         && matchesExcludeTextOrDescription(sibling, widget)) {
                     return true;
                 }
@@ -854,6 +821,46 @@ public class MainFunction {
             return false;
         } catch (RuntimeException ignored) {
             return true;
+        }
+    }
+
+    private static final class NodeNeighborhood {
+        final AccessibilityNodeInfo node;
+        private AccessibilityNodeInfo parent;
+        private boolean parentLoaded;
+        private List<AccessibilityNodeInfo> children;
+        private List<AccessibilityNodeInfo> siblings;
+
+        NodeNeighborhood(AccessibilityNodeInfo node) { this.node = node; }
+
+        AccessibilityNodeInfo parent() {
+            if (!parentLoaded) {
+                parent = AccessibilityNodeFreshness.mark(node.getParent());
+                parentLoaded = true;
+            }
+            return parent;
+        }
+
+        List<AccessibilityNodeInfo> children() {
+            if (children == null) { children = loadChildren(node); }
+            return children;
+        }
+
+        List<AccessibilityNodeInfo> siblings() {
+            if (siblings == null) { siblings = loadChildren(parent()); }
+            return siblings;
+        }
+
+        private static List<AccessibilityNodeInfo> loadChildren(AccessibilityNodeInfo node) {
+            List<AccessibilityNodeInfo> nodes = new ArrayList<>();
+            if (node != null) {
+                int count = Math.min(node.getChildCount(), WIDGET_MAX_CHILDREN);
+                for (int i = 0; i < count; i++) {
+                    AccessibilityNodeInfo child = AccessibilityNodeFreshness.mark(node.getChild(i));
+                    if (child != null) { nodes.add(child); }
+                }
+            }
+            return nodes;
         }
     }
 
@@ -916,7 +923,7 @@ public class MainFunction {
                 if (!isCoordinateExecutionValid(coordinate, generation)) {
                     return;
                 }
-                if (clickIndex == 0 && isPreconditionPending(coordinate.preconditionRuleId)) {
+                if (clickIndex == 0 && isPreconditionPending(coordinate.resolvedPrecondition)) {
                     if (shouldRetryCoordinatePrecondition(coordinate)) {
                         scheduleCoordinateClick(coordinate, generation, clickIndex,
                                 PRECONDITION_RETRY_DELAY_MILLIS);
@@ -965,7 +972,7 @@ public class MainFunction {
                 || (coordinate.maxTriggerCount > 0
                 && coordinate.triggerCount >= coordinate.maxTriggerCount)
                 || !isWithinInitialMatchWindow(coordinate.initialMatchWindowMillis)
-                || !hasSatisfiedPrecondition(coordinate.preconditionRuleId)) {
+                || !coordinate.preconditionValid || !hasSatisfiedPrecondition(coordinate.resolvedPrecondition)) {
             return false;
         }
         long nowMillis = System.currentTimeMillis();
@@ -987,11 +994,11 @@ public class MainFunction {
         return elapsed >= 0L && elapsed <= windowMillis;
     }
 
-    private boolean hasSatisfiedPrecondition(Long preconditionRuleId) {
+    private boolean hasSatisfiedPrecondition(RuleReference preconditionRuleId) {
         return preconditionRuleId == null || triggeredRuleIds.contains(preconditionRuleId);
     }
 
-    private boolean isPreconditionPending(Long preconditionRuleId) {
+    private boolean isPreconditionPending(RuleReference preconditionRuleId) {
         return preconditionRuleId != null && !triggeredRuleIds.contains(preconditionRuleId);
     }
 
@@ -1006,9 +1013,10 @@ public class MainFunction {
         return elapsed >= 0L && elapsed < maxWaitMillis;
     }
 
-    private void markSuccessfulRuleTrigger(Long ruleId) {
+    private void markSuccessfulRuleTrigger(int type, Long ruleId) {
         if (ruleId != null) {
-            triggeredRuleIds.add(ruleId);
+            triggeredRuleIds.add(new RuleReference(type, ruleId));
+            refreshWidgetScanEligibility();
         }
     }
 
@@ -1033,22 +1041,33 @@ public class MainFunction {
         if (clickIndex == 0 && !canStartCoordinateRule(coordinate)) {
             return;
         }
-        boolean actionAccepted = click(coordinate.xPosition, coordinate.yPosition);
-        if (clickIndex == 0) {
-            if (actionAccepted) {
-                markSuccessfulRuleTrigger(coordinate.id);
-                coordinate.triggerCount += 1;
-                coordinate.lastTriggerTime = System.currentTimeMillis();
-                MyApplication.executeDatabase(() -> dataDao.updateCoordinate(coordinate));
+        submitAction(done -> dispatchTapGesture(coordinate.xPosition, coordinate.yPosition, done),
+                () -> isCoordinateExecutionValid(coordinate, generation)
+                        && (clickIndex > 0 || canStartCoordinateRule(coordinate)), false, success -> {
+            if (closed.get()) {
+                return;
+            }
+            if (clickIndex == 0 && success) {
+                if (generation == pageGeneration) {
+                    markSuccessfulRuleTrigger(RuleReference.COORDINATE, coordinate.id);
+                }
+                coordinate.triggerCount = Math.min(Integer.MAX_VALUE - 1, coordinate.triggerCount) + 1;
+                long triggeredAt = System.currentTimeMillis();
+                coordinate.lastTriggerTime = triggeredAt;
+                Long ruleId = coordinate.id;
+                if (ruleId != null) {
+                    MyApplication.executeDatabase(() -> dataDao.recordCoordinateTrigger(ruleId, triggeredAt));
+                }
                 showAutomaticClickToast(coordinate.comment);
             }
             addRuleLog("coordinate", coordinate.id, coordinate.appPackage,
                     coordinate.appActivity, visualVerified ? "视觉校验通过" : "页面匹配",
-                    actionAccepted ? "手势已提交" : "手势提交失败",
-                    coordinateLogDetails(coordinate));
-        }
-        scheduleCoordinateClick(coordinate, generation, clickIndex + 1,
-                coordinate.clickInterval <= 0 ? 10 : coordinate.clickInterval);
+                    success ? "点击已完成" : "点击失败或取消", coordinateLogDetails(coordinate));
+            if (success && generation == pageGeneration) {
+                scheduleCoordinateClick(coordinate, generation, clickIndex + 1,
+                        Math.max(10, coordinate.clickInterval));
+            }
+        });
     }
 
     @SuppressLint("NewApi")
@@ -1220,70 +1239,158 @@ public class MainFunction {
     private void scheduleWidgetClick(AccessibilityNodeInfo nodeInfo, Widget widget,
                                      List<Widget> widgets, long generation, int clickIndex, long delayMillis) {
         if (clickIndex >= widget.clickNumber || closed.get()) {
+            releaseWidgetReservation(widget, generation);
             return;
         }
-        schedulePageTask(executorServiceSub, new Runnable() {
-            @Override
-            public void run() {
-                if (generation != pageGeneration
-                        || !onOffWidgetSub
-                        || !currentActivity.equals(widget.appActivity)
-                        || !AccessibilityNodeFreshness.refresh(nodeInfo)
-                        || closed.get()) {
+        schedulePageTask(executorServiceSub, () -> {
+            BooleanSupplier valid = () -> generation == pageGeneration && onOffWidgetSub
+                    && TextUtils.equals(currentActivity, widget.appActivity) && !closed.get()
+                    && (clickIndex > 0 || (!widget.hasReachedMaxTriggerCount()
+                    && isWithinInitialMatchWindow(widget.initialMatchWindowMillis)
+                    && !WidgetScanPolicy.isCooldownActive(widget, System.currentTimeMillis())));
+            submitAction(done -> executorServiceSub.execute(() -> {
+                Consumer<Boolean> result = success -> mainHandler.post(() -> done.accept(success));
+                try {
+                    if (!valid.getAsBoolean() || !AccessibilityNodeFreshness.refresh(nodeInfo)) {
+                        result.accept(false);
+                        return;
+                    }
+                    if (!done.isActive() || !valid.getAsBoolean()) { return; }
+                    if (widget.action == Widget.ACTION_BACK) {
+                        result.accept(service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK));
+                    } else if (!widget.clickOnly && nodeInfo.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                        result.accept(true);
+                    } else {
+                        Rect rect = new Rect();
+                        nodeInfo.getBoundsInScreen(rect);
+                        if (rect.isEmpty()) {
+                            result.accept(false);
+                        } else {
+                            mainHandler.post(() -> {
+                                if (!done.isActive()) { return; }
+                                if (valid.getAsBoolean()) {
+                                    dispatchTapGesture(rect.centerX(), rect.centerY(), done);
+                                } else {
+                                    done.accept(false);
+                                }
+                            });
+                        }
+                    }
+                } catch (RuntimeException exception) {
+                    result.accept(false);
+                }
+            }), valid, false, success -> {
+                if (closed.get()) {
                     return;
                 }
-                Rect currentRect = new Rect();
-                nodeInfo.getBoundsInScreen(currentRect);
-                if (currentRect.isEmpty()) {
-                    return;
+                if (clickIndex == 0 && success) {
+                    if (generation == pageGeneration) {
+                        alreadyClickSet.add(widget);
+                        markSuccessfulRuleTrigger(RuleReference.WIDGET, widget.id);
+                    }
+                    widget.triggerCount = Math.min(Integer.MAX_VALUE - 1, widget.triggerCount) + 1;
+                    long triggeredAt = System.currentTimeMillis();
+                    widget.lastTriggerTime = triggeredAt;
+                    Long ruleId = widget.id;
+                    String reason = widget.triggerReason;
+                    if (ruleId != null) {
+                        MyApplication.executeDatabase(() -> dataDao.recordWidgetTrigger(ruleId, triggeredAt, reason));
+                    }
+                    showAutomaticClickToast(widget.comment);
                 }
-                int centerX = currentRect.centerX();
-                int centerY = currentRect.centerY();
-                boolean actionAccepted;
-                String actionResult;
-                if (widget.clickOnly) {
-                    actionAccepted = click(centerX, centerY);
-                    actionResult = actionAccepted ? "手势已提交" : "手势提交失败";
-                } else if (nodeInfo.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                    actionAccepted = true;
-                    actionResult = "节点点击已执行";
+                addRuleLog("widget", widget.id, widget.appPackage, widget.appActivity,
+                        widget.triggerReason, success ? "动作已完成" : "动作失败或取消", widget);
+                if (!success && generation == pageGeneration) {
+                    failedWidgetSet.add(widget);
+                }
+                if (success && generation == pageGeneration
+                        && widget.action == Widget.ACTION_CLICK && clickIndex + 1 < widget.clickNumber) {
+                    scheduleWidgetClick(nodeInfo, widget, widgets, generation, clickIndex + 1,
+                            Math.max(10, widget.clickInterval));
                 } else {
-                    actionAccepted = click(centerX, centerY);
-                    actionResult = actionAccepted ? "备用手势已提交" : "备用手势提交失败";
+                    releaseWidgetReservation(widget, generation);
                 }
-                if (clickIndex == 0) {
-                    if (actionAccepted) {
-                        markSuccessfulRuleTrigger(widget.id);
-                        widget.triggerCount += 1;
-                        widget.lastTriggerTime = System.currentTimeMillis();
-                        MyApplication.executeDatabase(() -> dataDao.updateWidget(widget));
-                        showAutomaticClickToast(widget.comment);
-                    }
-                    addRuleLog("widget", widget.id, widget.appPackage, widget.appActivity,
-                            widget.triggerReason, actionResult, widget);
-                    if (!hasPendingWidgetRules(widgets)) {
-                        setContentChangeEventsEnabled(false);
-                    }
-                }
-                scheduleWidgetClick(nodeInfo, widget, widgets, generation, clickIndex + 1,
-                        widget.clickInterval <= 0 ? 10 : widget.clickInterval);
-            }
+                refreshWidgetScanEligibility();
+            });
         }, Math.max(0, delayMillis));
     }
 
-    /**
-     * 模拟
-     * 点击
-     */
-    private boolean click(int x, int y) {
-        DoubleTapCaptureController controller = dbClickController;
-        if (controller != null && controller.isHandlingTouch()) {
-            return false;
+    private void releaseWidgetReservation(Widget widget, long generation) {
+        schedulePageTask(executorServiceSub, () -> {
+            if (generation == pageGeneration) {
+                debounceSet.remove(widget);
+                refreshWidgetScanEligibility();
+            }
+        }, Math.max(widget.debounceDelay, WIDGET_POST_ACTION_FREEZE_MILLIS));
+    }
+
+    private void submitAction(ActionDispatcher.Action action, BooleanSupplier valid,
+                              boolean manual, Consumer<Boolean> completed) {
+        mainHandler.post(() -> actionDispatcher.submit(action, valid,
+                () -> manual || dbClickController == null || !dbClickController.isHandlingTouch(),
+                manual, completed));
+    }
+
+    private void dispatchTapGesture(float x, float y, ActionDispatcher.Completion completed) {
+        String target = currentPackage + ":" + currentActivity;
+        View overlay = dbClickView;
+        boolean covered = overlay != null && overlay.isAttachedToWindow() && dbClickLp != null
+                && x >= dbClickLp.x && x < dbClickLp.x + dbClickLp.width
+                && y >= dbClickLp.y && y < dbClickLp.y + dbClickLp.height;
+        if (covered) {
+            windowManager.removeViewImmediate(overlay);
         }
+        AtomicBoolean finished = new AtomicBoolean();
+        Runnable restore = () -> {
+            if (covered && !closed.get() && dbClickView == overlay && !overlay.isAttachedToWindow()) {
+                try {
+                    windowManager.addView(overlay, dbClickLp);
+                } catch (WindowManager.BadTokenException | WindowManager.InvalidDisplayException exception) {
+                    addStateLog("点击回放：", "恢复触发区域失败");
+                }
+            }
+        };
+        Runnable timeout = () -> {
+            if (finished.compareAndSet(false, true)) {
+                restore.run();
+                // The queue timeout reports failure without retrying an unknown outcome.
+            }
+        };
+        Consumer<Boolean> callback = success -> {
+            if (finished.compareAndSet(false, true)) {
+                mainHandler.removeCallbacks(timeout);
+                restore.run();
+                completed.accept(success);
+            }
+        };
+        mainHandler.postDelayed(timeout, 1200);
+        mainHandler.postDelayed(() -> {
+            if (!completed.isActive() || closed.get() || !target.equals(currentPackage + ":" + currentActivity)) {
+                callback.accept(false);
+                return;
+            }
+            try {
+                dispatchRawTapGesture(x, y, callback);
+            } catch (RuntimeException exception) {
+                callback.accept(false);
+            }
+        }, covered ? 32 : 0);
+    }
+
+    private void dispatchRawTapGesture(float x, float y, Consumer<Boolean> completed) {
         Path path = new Path();
         path.moveTo(x, y);
-        GestureDescription.Builder builder = new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(path, 0, 50));
-        return service.dispatchGesture(builder.build(), null, null);
+        GestureDescription gesture = new GestureDescription.Builder()
+                .addStroke(new GestureDescription.StrokeDescription(path, 0, 50)).build();
+        boolean accepted = service.dispatchGesture(gesture, new AccessibilityService.GestureResultCallback() {
+            @Override
+            public void onCompleted(GestureDescription description) { completed.accept(true); }
+            @Override
+            public void onCancelled(GestureDescription description) { completed.accept(false); }
+        }, mainHandler);
+        if (!accepted) {
+            completed.accept(false);
+        }
     }
 
     /**
@@ -3162,33 +3269,17 @@ public class MainFunction {
                     if (closed.get() || dbClickView != overlay) {
                         return false;
                     }
-                    try {
-                        Path path = new Path();
-                        path.moveTo(x, y);
-                        GestureDescription gesture = new GestureDescription.Builder()
-                                .addStroke(new GestureDescription.StrokeDescription(path, 0, 50))
-                                .build();
-                        boolean accepted = service.dispatchGesture(gesture,
-                                new AccessibilityService.GestureResultCallback() {
-                            @Override
-                            public void onCompleted(GestureDescription gestureDescription) {
+                    String target = currentPackage + ":" + currentActivity;
+                    submitAction(done -> dispatchTapGesture(x, y, done),
+                            () -> !closed.get() && dbClickView == overlay
+                                    && target.equals(currentPackage + ":" + currentActivity),
+                            true, success -> {
+                                if (!success) {
+                                    addStateLog("单击回放：", "点击失败或取消");
+                                }
                                 finished.run();
-                            }
-
-                            @Override
-                            public void onCancelled(GestureDescription gestureDescription) {
-                                addStateLog("单击回放：", "手势取消");
-                                finished.run();
-                            }
-                        }, mainHandler);
-                        if (!accepted) {
-                            addStateLog("单击回放：", "手势提交失败");
-                        }
-                        return accepted;
-                    } catch (IllegalArgumentException | IllegalStateException exception) {
-                        addStateLog("单击回放：", "手势提交异常");
-                        return false;
-                    }
+                            });
+                    return true;
                 }
 
                 @Override
@@ -3325,16 +3416,45 @@ public class MainFunction {
         return hasCoordinates || hasWidgets;
     }
 
-    private boolean hasPendingWidgetRules(List<Widget> widgets) {
-        for (Widget widget : widgets) {
-            if (widget.action == Widget.ACTION_CLICK && !widget.noRepeat) {
-                return true;
-            }
-            if (!alreadyClickSet.contains(widget)) {
-                return true;
+    private void refreshWidgetScanEligibility() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post(widgetEligibilityTask);
+            return;
+        }
+        mainHandler.removeCallbacks(widgetEligibilityTask);
+        if (closed.get() || !onOffWidgetSub || widgetSet == null) {
+            setContentChangeEventsEnabled(false);
+            return;
+        }
+        boolean eligible = false;
+        long nextCheck = Long.MAX_VALUE;
+        long now = System.currentTimeMillis();
+        long elapsed = SystemClock.uptimeMillis() - currentActivityStartedAtUptimeMillis;
+        for (Widget widget : widgetSet) {
+            long delay = WidgetScanPolicy.nextEvaluationDelay(widget, alreadyClickSet.contains(widget),
+                    debounceSet.contains(widget), failedWidgetSet.contains(widget),
+                    hasSatisfiedPrecondition(widget.resolvedPrecondition), now, elapsed);
+            if (delay < 0) { continue; }
+            if (delay == 0) {
+                eligible = true;
+                if (widget.initialMatchWindowMillis > 0) {
+                    nextCheck = Math.min(nextCheck, widget.initialMatchWindowMillis - elapsed + 1);
+                }
+            } else {
+                nextCheck = Math.min(nextCheck, delay);
             }
         }
-        return false;
+        boolean resumed = eligible && !contentChangeEventsEnabled;
+        setContentChangeEventsEnabled(eligible);
+        if (nextCheck != Long.MAX_VALUE) {
+            mainHandler.postDelayed(widgetEligibilityTask, Math.max(1, nextCheck));
+        }
+        if (resumed) {
+            AccessibilityNodeInfo root = AccessibilityNodeFreshness.mark(service.getRootInActiveWindow());
+            if (root != null && TextUtils.equals(currentPackage, root.getPackageName())) {
+                scheduleWidgetScan(Collections.singletonList(root), widgetSet, pageGeneration, 0);
+            }
+        }
     }
 
     private void setContentChangeEventsEnabled(boolean enabled) {
@@ -3421,9 +3541,11 @@ public class MainFunction {
         setContentChangeEventsEnabled(false);
         alreadyClickSet.clear();
         debounceSet.clear();
+        failedWidgetSet.clear();
         triggeredRuleIds.clear();
         onOffWidget = false;
         onOffWidgetSub = false;
+        mainHandler.removeCallbacks(widgetEligibilityTask);
         onOffCoordinate = false;
         onOffCoordinateSub = false;
         coordinateSetMap = Collections.emptyMap();
@@ -3497,6 +3619,7 @@ public class MainFunction {
             dbClickController.close();
             dbClickController = null;
         }
+        actionDispatcher.close();
         pageGeneration++;
         layoutCaptureGeneration.incrementAndGet();
         quickCaptureInProgress.set(false);
@@ -3532,6 +3655,7 @@ public class MainFunction {
         dbClickView = null;
         alreadyClickSet.clear();
         debounceSet.clear();
+        failedWidgetSet.clear();
         triggeredRuleIds.clear();
         currentActivityStartedAtUptimeMillis = 0L;
         synchronized (this) {

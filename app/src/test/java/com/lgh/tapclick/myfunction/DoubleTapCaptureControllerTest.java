@@ -142,7 +142,7 @@ public class DoubleTapCaptureControllerTest {
 
         FakeHost timedOut = new FakeHost();
         tap(timedOut, 900, 40);
-        timedOut.advance(1332);
+        timedOut.advance(4332);
         assertTrue(timedOut.overlayVisible);
         assertEquals(1, timedOut.restoreCount);
     }
@@ -200,7 +200,7 @@ public class DoubleTapCaptureControllerTest {
         tap(host, 900, 40);
         host.advance(332);
         Runnable firstCompletion = host.completion;
-        host.advance(1000);
+        host.advance(4000);
         tap(host, 900, 40);
         host.advance(332);
         firstCompletion.run();

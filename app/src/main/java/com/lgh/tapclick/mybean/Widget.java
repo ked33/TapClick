@@ -51,13 +51,19 @@ public class Widget {
     public int initialMatchWindowMillis;
     /** Optional rule id that must have triggered earlier on this Activity. */
     public Long preconditionRuleId;
+    @ColumnInfo(defaultValue = "0")
+    public int preconditionRuleType;
+    @Ignore
+    public transient com.lgh.tapclick.myclass.RuleReference resolvedPrecondition;
+    @Ignore
+    public transient boolean preconditionValid = true;
     /** 0 means no successful-action cooldown. */
     @ColumnInfo(defaultValue = "0")
     public int actionCooldownMillis;
     public String comment;
-    public String triggerReason;
-    public long lastTriggerTime;
-    public int triggerCount;
+    public volatile String triggerReason;
+    public volatile long lastTriggerTime;
+    public volatile int triggerCount;
     public int clickInterval;
     public int clickNumber;
     public int action;
@@ -132,6 +138,7 @@ public class Widget {
         this.maxTriggerCount = widget.maxTriggerCount;
         this.initialMatchWindowMillis = widget.initialMatchWindowMillis;
         this.preconditionRuleId = widget.preconditionRuleId;
+        this.preconditionRuleType = widget.preconditionRuleType;
         this.actionCooldownMillis = widget.actionCooldownMillis;
         this.comment = widget.comment;
         this.lastTriggerTime = widget.lastTriggerTime;

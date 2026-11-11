@@ -35,24 +35,11 @@ jobs:
           cache-read-only: ${{ github.event_name == 'pull_request' }}
           gradle-home-cache-cleanup: true
 
-      - name: Cache Android SDK
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.ANDROID_HOME }}/platforms
-            ${{ env.ANDROID_HOME }}/build-tools
-            ${{ env.ANDROID_HOME }}/platform-tools
-            ${{ env.ANDROID_HOME }}/licenses
-            ${{ env.ANDROID_HOME }}/cmdline-tools
-          key: android-sdk-api36-bt36-${{ runner.os }}-v1
-          restore-keys: |
-            android-sdk-api36-bt36-${{ runner.os }}-
-            android-sdk-api36-
-
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
           packages: platform-tools platforms;android-36 build-tools;36.0.0
+          log-accepted-android-sdk-licenses: false
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
@@ -103,6 +90,7 @@ jobs:
         uses: android-actions/setup-android@v3
         with:
           packages: platform-tools platforms;android-36 build-tools;36.0.0
+          log-accepted-android-sdk-licenses: false
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew

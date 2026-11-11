@@ -212,18 +212,16 @@
             <androidx.appcompat.widget.AppCompatTextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="前置规则ID:"
+                android:text="前置规则:"
                 android:textColor="@color/text_color"
                 android:textSize="12sp" />
 
-            <androidx.appcompat.widget.AppCompatEditText
+            <androidx.appcompat.widget.AppCompatTextView
                 android:id="@+id/widget_precondition_rule_id"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
                 android:layout_marginStart="5dp"
                 android:background="@null"
-                android:inputType="number"
-                android:maxLength="19"
                 android:singleLine="true"
                 android:textColor="@color/text_color"
                 android:textSize="12sp" />
