@@ -105,7 +105,7 @@
                 android:button="@drawable/check_select"
                 android:paddingHorizontal="5dp"
                 android:paddingVertical="10dp"
-                android:text="双击屏幕捕获控件 (默认右上角)" />
+                android:text="双击屏幕捕获控件 (默认右上角)\n单击稍后生效；该区域不支持长按、滑动" />
 
             <androidx.appcompat.widget.AppCompatButton
                 android:id="@+id/start"

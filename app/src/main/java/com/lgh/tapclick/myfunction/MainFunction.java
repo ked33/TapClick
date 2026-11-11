@@ -37,6 +37,7 @@ import android.view.Display;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
@@ -199,6 +200,7 @@ public class MainFunction {
     private View ignoreView;
     private WindowManager.LayoutParams dbClickLp;
     private View dbClickView;
+    private volatile DoubleTapCaptureController dbClickController;
     private final AtomicBoolean closed;
     private boolean receiverRegistered;
 
@@ -454,6 +456,7 @@ public class MainFunction {
     }
 
     public void onConfigurationChanged(Configuration newConfig) {
+        cancelDbClickPendingTaps();
         layoutCaptureGeneration.incrementAndGet();
         quickCaptureInProgress.set(false);
         frozenCoordinateSelected = false;
@@ -490,7 +493,7 @@ public class MainFunction {
             dbClickLp.y = rect.top;
             dbClickLp.width = rect.width();
             dbClickLp.height = rect.height();
-            windowManager.updateViewLayout(dbClickView, dbClickLp);
+            updateDbClickLayout();
         }
     }
 
@@ -1273,6 +1276,10 @@ public class MainFunction {
      * 点击
      */
     private boolean click(int x, int y) {
+        DoubleTapCaptureController controller = dbClickController;
+        if (controller != null && controller.isHandlingTouch()) {
+            return false;
+        }
         Path path = new Path();
         path.moveTo(x, y);
         GestureDescription.Builder builder = new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(path, 0, 50));
@@ -1323,6 +1330,7 @@ public class MainFunction {
      * 创建规则时调用
      */
     public void showAddDataWindow(boolean capture) {
+        cancelDbClickPendingTaps();
         if (capture) {
             requestQuickLayoutCapture();
             return;
@@ -3071,11 +3079,21 @@ public class MainFunction {
         }
     }
 
+    @SuppressLint("ClickableViewAccessibility")
     public void showDbClickFloating(boolean enable) {
         if (closed.get()) {
             return;
         }
-        if (enable && dbClickView == null) {
+        if (!enable) {
+            if (dbClickController != null) {
+                dbClickController.close();
+                dbClickController = null;
+            }
+            removeViewSafely(dbClickView);
+            dbClickView = null;
+            return;
+        }
+        if (dbClickView == null) {
             dbClickLp = new WindowManager.LayoutParams();
             dbClickLp.flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                     | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
@@ -3093,25 +3111,127 @@ public class MainFunction {
 
             dbClickView = new View(service);
             dbClickView.setBackgroundColor(Color.TRANSPARENT);
-            dbClickView.setOnClickListener(new View.OnClickListener() {
-                private long previousTime = 0;
+            final View overlay = dbClickView;
+            ViewConfiguration configuration = ViewConfiguration.get(service);
+            final DoubleTapCaptureController controller = new DoubleTapCaptureController(
+                    new DoubleTapCaptureController.Host() {
+                @Override
+                public Object currentTarget() {
+                    return currentPackage + "\n" + currentActivity;
+                }
 
                 @Override
-                public void onClick(View v) {
-                    long currentTime = System.currentTimeMillis();
-                    long interval = currentTime - previousTime;
-                    previousTime = currentTime;
-                    if (interval <= 1000) {
-                        addCaptureLog("doubleTap", currentPackage, true, interval,
-                                "received=true");
-                        showAddDataWindow(true);
+                public void postDelayed(Runnable action, long delayMillis) {
+                    mainHandler.postDelayed(action, delayMillis);
+                }
+
+                @Override
+                public void removeCallbacks(Runnable action) {
+                    mainHandler.removeCallbacks(action);
+                }
+
+                @Override
+                public boolean hideOverlay() {
+                    if (closed.get() || dbClickView != overlay || !overlay.isAttachedToWindow()) {
+                        return false;
+                    }
+                    try {
+                        // Remove the input window synchronously before replaying the tap.
+                        windowManager.removeViewImmediate(overlay);
+                        return true;
+                    } catch (IllegalArgumentException exception) {
+                        addStateLog("单击回放：", "移除触发区域失败");
+                        return false;
                     }
                 }
+
+                @Override
+                public void restoreOverlay() {
+                    if (closed.get() || dbClickView != overlay || overlay.isAttachedToWindow()) {
+                        return;
+                    }
+                    try {
+                        windowManager.addView(overlay, dbClickLp);
+                    } catch (WindowManager.BadTokenException | WindowManager.InvalidDisplayException exception) {
+                        addStateLog("单击回放：", "恢复触发区域失败");
+                    }
+                }
+
+                @Override
+                public boolean dispatchTap(float x, float y, Runnable finished) {
+                    if (closed.get() || dbClickView != overlay) {
+                        return false;
+                    }
+                    try {
+                        Path path = new Path();
+                        path.moveTo(x, y);
+                        GestureDescription gesture = new GestureDescription.Builder()
+                                .addStroke(new GestureDescription.StrokeDescription(path, 0, 50))
+                                .build();
+                        boolean accepted = service.dispatchGesture(gesture,
+                                new AccessibilityService.GestureResultCallback() {
+                            @Override
+                            public void onCompleted(GestureDescription gestureDescription) {
+                                finished.run();
+                            }
+
+                            @Override
+                            public void onCancelled(GestureDescription gestureDescription) {
+                                addStateLog("单击回放：", "手势取消");
+                                finished.run();
+                            }
+                        }, mainHandler);
+                        if (!accepted) {
+                            addStateLog("单击回放：", "手势提交失败");
+                        }
+                        return accepted;
+                    } catch (IllegalArgumentException | IllegalStateException exception) {
+                        addStateLog("单击回放：", "手势提交异常");
+                        return false;
+                    }
+                }
+
+                @Override
+                public void capture() {
+                    addCaptureLog("doubleTap", currentPackage, true, 0, "received=true");
+                    showAddDataWindow(true);
+                }
+            }, ViewConfiguration.getDoubleTapTimeout(), ViewConfiguration.getLongPressTimeout(),
+                    configuration.getScaledTouchSlop(), configuration.getScaledDoubleTapSlop());
+            dbClickController = controller;
+            overlay.setOnTouchListener((view, event) -> {
+                switch (event.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        controller.onDown(event.getRawX(), event.getRawY(), event.getEventTime());
+                        break;
+                    case MotionEvent.ACTION_MOVE:
+                        controller.onMove(event.getRawX(), event.getRawY());
+                        break;
+                    case MotionEvent.ACTION_UP:
+                        controller.onUp(event.getRawX(), event.getRawY(), event.getEventTime());
+                        break;
+                    case MotionEvent.ACTION_POINTER_DOWN:
+                    case MotionEvent.ACTION_CANCEL:
+                        controller.cancelPendingTaps();
+                        break;
+                    default:
+                        break;
+                }
+                return true;
             });
             windowManager.addView(dbClickView, dbClickLp);
-        } else if (dbClickView != null) {
-            windowManager.removeView(dbClickView);
-            dbClickView = null;
+        }
+    }
+
+    private void cancelDbClickPendingTaps() {
+        if (dbClickController != null) {
+            dbClickController.cancelPendingTaps();
+        }
+    }
+
+    private void updateDbClickLayout() {
+        if (dbClickView != null && dbClickView.isAttachedToWindow()) {
+            windowManager.updateViewLayout(dbClickView, dbClickLp);
         }
     }
 
@@ -3122,6 +3242,7 @@ public class MainFunction {
         if (dbClickView == null || dbClickLp == null) {
             return;
         }
+        cancelDbClickPendingTaps();
         ViewDbClickSettingBinding dbClickSettingBinding = ViewDbClickSettingBinding.inflate(LayoutInflater.from(service));
         AlertDialog alertDialog = new AlertDialog.Builder(service).setView(dbClickSettingBinding.getRoot()).create();
         alertDialog.getWindow().setType(WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY);
@@ -3129,8 +3250,10 @@ public class MainFunction {
         alertDialog.setOnDismissListener(new DialogInterface.OnDismissListener() {
             @Override
             public void onDismiss(DialogInterface dialog) {
-                dbClickView.setBackgroundColor(Color.TRANSPARENT);
-                windowManager.updateViewLayout(dbClickView, dbClickLp);
+                if (dbClickView != null) {
+                    dbClickView.setBackgroundColor(Color.TRANSPARENT);
+                    updateDbClickLayout();
+                }
             }
         });
         alertDialog.show();
@@ -3164,7 +3287,7 @@ public class MainFunction {
                 if (seekBar == dbClickSettingBinding.seekBarY) {
                     dbClickLp.y = i;
                 }
-                windowManager.updateViewLayout(dbClickView, dbClickLp);
+                updateDbClickLayout();
             }
 
             @Override
@@ -3186,7 +3309,7 @@ public class MainFunction {
         dbClickSettingBinding.seekBarX.setOnSeekBarChangeListener(onSeekBarChangeListener);
         dbClickSettingBinding.seekBarY.setOnSeekBarChangeListener(onSeekBarChangeListener);
         dbClickView.setBackgroundColor(Color.RED);
-        windowManager.updateViewLayout(dbClickView, dbClickLp);
+        updateDbClickLayout();
     }
 
     private static boolean hasRunnableRules(AppDescribe describe) {
@@ -3370,6 +3493,10 @@ public class MainFunction {
         if (!closed.compareAndSet(false, true)) {
             return;
         }
+        if (dbClickController != null) {
+            dbClickController.close();
+            dbClickController = null;
+        }
         pageGeneration++;
         layoutCaptureGeneration.incrementAndGet();
         quickCaptureInProgress.set(false);
@@ -3433,6 +3560,7 @@ public class MainFunction {
         @Override
         public void onReceive(Context context, Intent intent) {
             if (TextUtils.equals(intent.getAction(), Intent.ACTION_SCREEN_OFF)) {
+                cancelDbClickPendingTaps();
                 deactivateCurrentPage(true);
             }
         }
